@@ -3,6 +3,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
+  Award,
   BarChart3,
   Bell,
   CalendarDays,
@@ -11,181 +12,1252 @@ import {
   ClipboardCopy,
   Clock3,
   Compass,
+  Crown,
+  FastForward,
+  Globe,
   IndianRupee,
   LayoutDashboard,
   LoaderCircle,
   MapPin,
   Menu,
   MessageSquareText,
+  Play,
   Plus,
   RefreshCw,
   Search,
   Send,
+  Shield,
   ShieldCheck,
   Sparkles,
+  Star,
   Swords,
   Trash2,
+  TrendingUp,
   Trophy,
   Users,
   X,
 } from "lucide-react";
 import type { ChatGPTUser } from "./chatgpt-auth";
 import ThemeToggle from "./theme-toggle";
+import type { AppData, Division, Entry, Fixture, MatchEvent, Player, SquadMember, Tournament } from "./components/types";
+import { SquadManager } from "./components/squads/SquadManager";
+import { LiveMatchConsole } from "./components/matchday/LiveMatchConsole";
+import { KnockoutBracket } from "./components/brackets/KnockoutBracket";
+import { LeaderboardsView } from "./components/stats/LeaderboardsView";
+import { StandingsView } from "./components/standings/StandingsView";
 
-type View = "Overview" | "Tournaments" | "Teams" | "Fixtures" | "Matchday" | "Standings" | "Inbox";
-type Tournament = { id: string; name: string; organizedBy: string; city: string; venueName: string; addressLine1: string; locality: string; state: string; postalCode: string; latitude: string; longitude: string; startDate: string; durationDays: number; status: string; contactName: string; contactPhone: string; createdAt: string };
-type Division = { id: string; tournamentId: string; name: string; format: string; maxSquadSize: number; maxTeams: number; feePaise: number; feeBasis: string; requirePlayers: boolean; requireDocuments: boolean; winPoints: number; drawPoints: number; lossPoints: number };
-type Entry = { id: string; divisionId: string; teamId: string; teamName: string; clubName: string; city: string; contactName: string; contactPhone: string; status: string; paymentStatus: string; amountPaise: number; registeredAt: string };
-type Fixture = { id: string; divisionId: string; roundNumber: number; roundName: string; homeEntryId: string; awayEntryId: string; kickoffAt: string; pitch: number; status: string; homeScore: number; awayScore: number };
-type MatchEvent = { id: string; fixtureId: string; entryId: string; type: string; playerName: string; matchMinute: number; createdAt: string };
-type Announcement = { id: string; tournamentId: string; body: string; audience: string; createdAt: string };
-type AppData = { tournaments: Tournament[]; divisions: Division[]; entries: Entry[]; fixtures: Fixture[]; events: MatchEvent[]; announcements: Announcement[] };
+type View =
+  | "Overview"
+  | "Tournaments"
+  | "Teams"
+  | "Squads"
+  | "Brackets"
+  | "Matchday"
+  | "Standings"
+  | "Stats"
+  | "Inbox";
 
-const emptyData: AppData = { tournaments: [], divisions: [], entries: [], fixtures: [], events: [], announcements: [] };
-const nav: Array<{ label: View; icon: typeof Trophy }> = [
-  { label: "Overview", icon: LayoutDashboard }, { label: "Tournaments", icon: Trophy }, { label: "Teams", icon: ShieldCheck },
-  { label: "Fixtures", icon: CalendarDays }, { label: "Matchday", icon: Swords }, { label: "Standings", icon: BarChart3 }, { label: "Inbox", icon: MessageSquareText },
+const emptyData: AppData = {
+  tournaments: [],
+  divisions: [],
+  entries: [],
+  fixtures: [],
+  events: [],
+  announcements: [],
+  players: [],
+  squadMembers: [],
+};
+
+const nav: Array<{ label: View; icon: typeof Trophy; badge?: string }> = [
+  { label: "Overview", icon: LayoutDashboard },
+  { label: "Tournaments", icon: Trophy },
+  { label: "Teams", icon: ShieldCheck },
+  { label: "Squads", icon: Users, badge: "New" },
+  { label: "Brackets", icon: CalendarDays, badge: "Live" },
+  { label: "Matchday", icon: Swords, badge: "Live" },
+  { label: "Standings", icon: BarChart3 },
+  { label: "Stats", icon: Award, badge: "New" },
+  { label: "Inbox", icon: MessageSquareText },
 ];
-const ageOptions = ["U-10", "U-12", "U-14", "U-16", "U-18", "Open"];
 
-const money = (paise: number) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(paise / 100);
-const dateLabel = (date: string) => new Date(`${date}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-const timeLabel = (date: string) => new Date(date).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" });
+const ageOptions = ["U-10", "U-12", "U-14", "U-16", "U-17", "U-18", "Open"];
+
+const money = (paise: number) =>
+  new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(
+    paise / 100
+  );
+const dateLabel = (date: string) =>
+  new Date(`${date}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+const timeLabel = (date: string) =>
+  new Date(date).toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "Asia/Kolkata",
+  });
 
 function Logo() {
-  return <div className="brand"><span className="brand-mark"><CircleDot size={21} strokeWidth={2.4} /></span><span>my<span>football</span></span></div>;
+  return (
+    <div className="brand">
+      <span className="brand-mark">
+        <CircleDot size={21} strokeWidth={2.4} />
+      </span>
+      <span>
+        my<span>football</span>
+      </span>
+    </div>
+  );
 }
 
-function Modal({ title, subtitle, onClose, children }: { title: string; subtitle: string; onClose: () => void; children: React.ReactNode }) {
-  return <div className="modal-backdrop" role="dialog" aria-modal="true"><div className="modal"><div className="modal-top"><div><span className="eyebrow">MyFootball operations</span><h2>{title}</h2><p>{subtitle}</p></div><button className="icon-button" onClick={onClose}><X size={19} /></button></div>{children}</div></div>;
+function Modal({
+  title,
+  subtitle,
+  onClose,
+  children,
+}: {
+  title: string;
+  subtitle: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <div className="modal">
+        <div className="modal-top">
+          <div>
+            <span className="eyebrow">MyFootball operations</span>
+            <h2>{title}</h2>
+            <p>{subtitle}</p>
+          </div>
+          <button className="icon-button" onClick={onClose}>
+            <X size={19} />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
 }
 
-function CreateTournament({ onClose, onSaved }: { onClose: () => void; onSaved: (payload: Record<string, unknown>) => Promise<void> }) {
-  const [ages, setAges] = useState(["U-14"]);
+function CreateTournament({
+  onClose,
+  onSaved,
+}: {
+  onClose: () => void;
+  onSaved: (payload: Record<string, unknown>) => Promise<void>;
+}) {
+  const [ages, setAges] = useState(["U-17"]);
   const [busy, setBusy] = useState(false);
   const [coords, setCoords] = useState({ latitude: "", longitude: "" });
-  const usePosition = () => navigator.geolocation?.getCurrentPosition(position => setCoords({ latitude: position.coords.latitude.toFixed(6), longitude: position.coords.longitude.toFixed(6) }));
+
+  const usePosition = () =>
+    navigator.geolocation?.getCurrentPosition((position) =>
+      setCoords({
+        latitude: position.coords.latitude.toFixed(6),
+        longitude: position.coords.longitude.toFixed(6),
+      })
+    );
+
   const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault(); setBusy(true);
+    event.preventDefault();
+    setBusy(true);
     const form = new FormData(event.currentTarget);
-    await onSaved({ action: "createTournament", name: form.get("name"), organizedBy: form.get("organizedBy"), city: form.get("city"), venueName: form.get("venueName"), addressLine1: form.get("addressLine1"), locality: form.get("locality"), state: form.get("state"), postalCode: form.get("postalCode"), latitude: form.get("latitude"), longitude: form.get("longitude"), startDate: form.get("startDate"), durationDays: form.get("durationDays"), contactName: form.get("contactName"), contactPhone: form.get("contactPhone"), format: form.get("format"), maxTeams: form.get("maxTeams"), maxSquadSize: form.get("maxSquadSize"), feeRupees: form.get("feeRupees"), ageGroups: ages, requirePlayers: form.get("requirePlayers") === "on", requireDocuments: form.get("requireDocuments") === "on" });
+    await onSaved({
+      action: "createTournament",
+      name: form.get("name"),
+      organizedBy: form.get("organizedBy"),
+      city: form.get("city"),
+      venueName: form.get("venueName"),
+      addressLine1: form.get("addressLine1"),
+      locality: form.get("locality"),
+      state: form.get("state"),
+      postalCode: form.get("postalCode"),
+      latitude: form.get("latitude"),
+      longitude: form.get("longitude"),
+      startDate: form.get("startDate"),
+      durationDays: form.get("durationDays"),
+      contactName: form.get("contactName"),
+      contactPhone: form.get("contactPhone"),
+      format: form.get("format"),
+      maxTeams: form.get("maxTeams"),
+      maxSquadSize: form.get("maxSquadSize"),
+      feeRupees: form.get("feeRupees"),
+      ageGroups: ages,
+      requirePlayers: form.get("requirePlayers") === "on",
+      requireDocuments: form.get("requireDocuments") === "on",
+    });
     setBusy(false);
   };
-  return <Modal title="Create a tournament" subtitle="Every field below is saved to your organizer account." onClose={onClose}><form onSubmit={submit}><div className="modal-body"><div className="form-grid">
-    <label className="field field-wide"><span>Tournament name</span><input name="name" placeholder="e.g. Kerala Youth Champions Cup" required autoFocus /></label>
-    <label className="field"><span>Organized by</span><input name="organizedBy" placeholder="Academy or organization" required /></label>
-    <label className="field"><span>Venue / ground name</span><input name="venueName" placeholder="Cooperage Football Ground" required /></label>
-    <label className="field field-wide"><span>Street address</span><input name="addressLine1" placeholder="Maharshi Karve Road, Nariman Point" required /></label>
-    <label className="field"><span>Locality / area</span><input name="locality" placeholder="Colaba" required /></label>
-    <label className="field"><span>City</span><input name="city" placeholder="Mumbai" required /></label>
-    <label className="field"><span>State</span><input name="state" placeholder="Maharashtra" required /></label>
-    <label className="field"><span>PIN code</span><input name="postalCode" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} placeholder="400021" required /></label>
-    <label className="field"><span>Latitude</span><input name="latitude" value={coords.latitude} onChange={event=>setCoords({...coords,latitude:event.target.value})} placeholder="18.924100" required /></label>
-    <label className="field"><span>Longitude</span><input name="longitude" value={coords.longitude} onChange={event=>setCoords({...coords,longitude:event.target.value})} placeholder="72.829600" required /></label>
-    <button className="location-helper field-wide" type="button" onClick={usePosition}><MapPin size={15}/> Use my current coordinates</button>
-    <label className="field"><span>Start date</span><input name="startDate" type="date" required /></label>
-    <label className="field"><span>Duration</span><select name="durationDays" defaultValue="2"><option value="1">1 day</option><option value="2">2 days</option><option value="3">3 days</option><option value="14">2 weeks</option><option value="28">4 weekends</option></select></label>
-    <label className="field"><span>Contact name</span><input name="contactName" required /></label>
-    <label className="field"><span>Contact phone</span><input name="contactPhone" type="tel" placeholder="+91..." required /></label>
-    <label className="field"><span>Format</span><select name="format"><option value="group_knockout">Groups + Knockout</option><option value="round_robin">Round robin</option><option value="knockout">Knockout</option></select></label>
-    <label className="field"><span>Maximum teams per division</span><select name="maxTeams" defaultValue="16"><option>8</option><option>12</option><option>16</option><option>24</option><option>32</option></select></label>
-    <label className="field"><span>Maximum squad size</span><input name="maxSquadSize" type="number" min="5" max="50" defaultValue="18" /></label>
-    <label className="field"><span>Fee per team (₹)</span><input name="feeRupees" type="number" min="0" defaultValue="0" /></label>
-    <div className="field field-wide"><span>Divisions</span><div className="chip-picker">{ageOptions.map(age => <button type="button" className={ages.includes(age) ? "pick selected" : "pick"} key={age} onClick={() => setAges(current => current.includes(age) ? current.filter(item => item !== age) : [...current, age])}>{ages.includes(age) && <Check size={13} />}{age}</button>)}</div></div>
-    <label className="toggle-row field-wide"><div><strong>Collect player lists</strong><small>Enable squad registration for this tournament</small></div><input name="requirePlayers" type="checkbox" /></label>
-    <label className="toggle-row field-wide"><div><strong>Require age documents</strong><small>Use only when age verification is necessary</small></div><input name="requireDocuments" type="checkbox" /></label>
-  </div></div><div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={busy || !ages.length}>{busy ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />} Create tournament</button></div></form></Modal>;
+
+  return (
+    <Modal title="Create a tournament" subtitle="Every field below is saved to your organizer account." onClose={onClose}>
+      <form onSubmit={submit}>
+        <div className="modal-body">
+          <div className="form-grid">
+            <label className="field field-wide">
+              <span>Tournament name</span>
+              <input name="name" placeholder="e.g. Mumbai Super Cup 2026" required autoFocus />
+            </label>
+            <label className="field">
+              <span>Organized by</span>
+              <input name="organizedBy" placeholder="Academy or organization" required />
+            </label>
+            <label className="field">
+              <span>Venue / ground name</span>
+              <input name="venueName" placeholder="Cooperage Football Ground" required />
+            </label>
+            <label className="field field-wide">
+              <span>Street address</span>
+              <input name="addressLine1" placeholder="Madame Cama Road, Colaba" required />
+            </label>
+            <label className="field">
+              <span>Locality / area</span>
+              <input name="locality" placeholder="Colaba" required />
+            </label>
+            <label className="field">
+              <span>City</span>
+              <input name="city" placeholder="Mumbai" required />
+            </label>
+            <label className="field">
+              <span>State</span>
+              <input name="state" placeholder="Maharashtra" required />
+            </label>
+            <label className="field">
+              <span>PIN code</span>
+              <input name="postalCode" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} placeholder="400001" required />
+            </label>
+            <label className="field">
+              <span>Latitude</span>
+              <input
+                name="latitude"
+                value={coords.latitude}
+                onChange={(event) => setCoords({ ...coords, latitude: event.target.value })}
+                placeholder="18.924800"
+                required
+              />
+            </label>
+            <label className="field">
+              <span>Longitude</span>
+              <input
+                name="longitude"
+                value={coords.longitude}
+                onChange={(event) => setCoords({ ...coords, longitude: event.target.value })}
+                placeholder="72.828600"
+                required
+              />
+            </label>
+            <button className="location-helper field-wide" type="button" onClick={usePosition}>
+              <MapPin size={15} /> Use my current coordinates
+            </button>
+            <label className="field">
+              <span>Start date</span>
+              <input name="startDate" type="date" required />
+            </label>
+            <label className="field">
+              <span>Duration</span>
+              <select name="durationDays" defaultValue="3">
+                <option value="1">1 day</option>
+                <option value="2">2 days</option>
+                <option value="3">3 days</option>
+                <option value="5">5 days</option>
+                <option value="14">2 weeks</option>
+                <option value="28">4 weekends</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Contact name</span>
+              <input name="contactName" required />
+            </label>
+            <label className="field">
+              <span>Contact phone</span>
+              <input name="contactPhone" type="tel" placeholder="+91..." required />
+            </label>
+            <label className="field">
+              <span>Tournament Format</span>
+              <select name="format" defaultValue="group_knockout">
+                <option value="group_knockout">Group Stage + Knockout Bracket</option>
+                <option value="round_robin">Round Robin League</option>
+                <option value="knockout">Pure Knockout Cup</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Maximum teams per division</span>
+              <select name="maxTeams" defaultValue="16">
+                <option>8</option>
+                <option>12</option>
+                <option>16</option>
+                <option>24</option>
+                <option>32</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Maximum squad size</span>
+              <input name="maxSquadSize" type="number" min="5" max="50" defaultValue="18" />
+            </label>
+            <label className="field">
+              <span>Fee per team (₹)</span>
+              <input name="feeRupees" type="number" min="0" defaultValue="3500" />
+            </label>
+            <div className="field field-wide">
+              <span>Divisions</span>
+              <div className="chip-picker">
+                {ageOptions.map((age) => (
+                  <button
+                    type="button"
+                    className={ages.includes(age) ? "pick selected" : "pick"}
+                    key={age}
+                    onClick={() =>
+                      setAges((current) =>
+                        current.includes(age) ? current.filter((item) => item !== age) : [...current, age]
+                      )
+                    }
+                  >
+                    {ages.includes(age) && <Check size={13} />}
+                    {age}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <label className="toggle-row field-wide">
+              <div>
+                <strong>Collect player lists</strong>
+                <small>Enable squad rosters and player stats tracking</small>
+              </div>
+              <input name="requirePlayers" type="checkbox" defaultChecked />
+            </label>
+          </div>
+        </div>
+        <div className="modal-actions">
+          <button type="button" className="button secondary" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="button primary" disabled={busy || !ages.length}>
+            {busy ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />} Create tournament
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
 }
 
-function AddTeam({ divisions, onClose, onSaved }: { divisions: Division[]; onClose: () => void; onSaved: (payload: Record<string, unknown>) => Promise<void> }) {
+function AddTeamModal({
+  divisions,
+  onClose,
+  onSaved,
+}: {
+  divisions: Division[];
+  onClose: () => void;
+  onSaved: (payload: Record<string, unknown>) => Promise<void>;
+}) {
   const [busy, setBusy] = useState(false);
-  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); const form = new FormData(event.currentTarget); await onSaved({ action: "addTeam", divisionId: form.get("divisionId"), clubName: form.get("clubName"), teamName: form.get("teamName"), organizationType: form.get("organizationType"), city: form.get("city"), contactName: form.get("contactName"), contactPhone: form.get("contactPhone"), paymentStatus: form.get("paymentStatus"), approved: form.get("approved") === "on" }); setBusy(false); };
-  return <Modal title="Add a team" subtitle="Manual entries use the same database as public registrations." onClose={onClose}><form onSubmit={submit}><div className="modal-body"><div className="form-grid">
-    <label className="field field-wide"><span>Division</span><select name="divisionId">{divisions.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
-    <label className="field"><span>Club / academy</span><input name="clubName" required /></label><label className="field"><span>Team name</span><input name="teamName" required /></label>
-    <label className="field"><span>Organization type</span><select name="organizationType"><option value="club">Club</option><option value="academy">Academy</option><option value="school">School</option><option value="institution">Institution</option></select></label><label className="field"><span>City</span><input name="city" /></label>
-    <label className="field"><span>Contact person</span><input name="contactName" required /></label><label className="field"><span>Mobile number</span><input name="contactPhone" type="tel" required /></label>
-    <label className="field"><span>Payment</span><select name="paymentStatus"><option value="unpaid">Unpaid</option><option value="paid">Paid</option><option value="waived">Waived</option></select></label><label className="toggle-row"><div><strong>Approve immediately</strong><small>Add to fixture pool</small></div><input name="approved" type="checkbox" defaultChecked /></label>
-  </div></div><div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />} Save team</button></div></form></Modal>;
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setBusy(true);
+    const form = new FormData(event.currentTarget);
+    await onSaved({
+      action: "addTeam",
+      divisionId: form.get("divisionId"),
+      clubName: form.get("clubName"),
+      teamName: form.get("teamName"),
+      organizationType: form.get("organizationType"),
+      city: form.get("city"),
+      contactName: form.get("contactName"),
+      contactPhone: form.get("contactPhone"),
+      paymentStatus: form.get("paymentStatus"),
+      groupName: form.get("groupName"),
+      approved: form.get("approved") === "on",
+    });
+    setBusy(false);
+  };
+  return (
+    <Modal title="Register Team" subtitle="Manual entries use the same database as public registrations." onClose={onClose}>
+      <form onSubmit={submit}>
+        <div className="modal-body">
+          <div className="form-grid">
+            <label className="field field-wide">
+              <span>Division</span>
+              <select name="divisionId">
+                {divisions.map((item) => (
+                  <option value={item.id} key={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>Club / Academy Name</span>
+              <input name="clubName" placeholder="Reliance Foundation Young Champs" required />
+            </label>
+            <label className="field">
+              <span>Team Name</span>
+              <input name="teamName" placeholder="RFYC U17" required />
+            </label>
+            <label className="field">
+              <span>Organization Type</span>
+              <select name="organizationType">
+                <option value="academy">Academy</option>
+                <option value="club">Club</option>
+                <option value="school">School</option>
+                <option value="institution">Institution</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Assigned Group</span>
+              <select name="groupName">
+                <option value="Group A">Group A</option>
+                <option value="Group B">Group B</option>
+                <option value="Group C">Group C</option>
+                <option value="Group D">Group D</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>City</span>
+              <input name="city" placeholder="Mumbai" />
+            </label>
+            <label className="field">
+              <span>Contact Person</span>
+              <input name="contactName" required />
+            </label>
+            <label className="field">
+              <span>Mobile Number</span>
+              <input name="contactPhone" type="tel" required />
+            </label>
+            <label className="field">
+              <span>Payment Status</span>
+              <select name="paymentStatus">
+                <option value="paid">Paid</option>
+                <option value="unpaid">Unpaid</option>
+                <option value="waived">Waived</option>
+              </select>
+            </label>
+            <label className="toggle-row field-wide">
+              <div>
+                <strong>Approve immediately</strong>
+                <small>Add directly to tournament fixture pool</small>
+              </div>
+              <input name="approved" type="checkbox" defaultChecked />
+            </label>
+          </div>
+        </div>
+        <div className="modal-actions">
+          <button type="button" className="button secondary" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="button primary" disabled={busy}>
+            {busy ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />} Save Team
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
 }
 
-function SetLocation({ tournament, onClose, onSaved }: { tournament: Tournament; onClose: () => void; onSaved: (payload: Record<string, unknown>) => Promise<void> }) {
-  const [coords,setCoords]=useState({latitude:tournament.latitude||"",longitude:tournament.longitude||""});
-  const [busy,setBusy]=useState(false);
-  const usePosition=()=>navigator.geolocation?.getCurrentPosition(position=>setCoords({latitude:position.coords.latitude.toFixed(6),longitude:position.coords.longitude.toFixed(6)}));
-  const submit=async(event:FormEvent<HTMLFormElement>)=>{event.preventDefault();setBusy(true);const form=new FormData(event.currentTarget);await onSaved({action:"updateLocation",tournamentId:tournament.id,venueName:form.get("venueName"),addressLine1:form.get("addressLine1"),locality:form.get("locality"),city:form.get("city"),state:form.get("state"),postalCode:form.get("postalCode"),latitude:form.get("latitude"),longitude:form.get("longitude")});setBusy(false);};
-  return <Modal title="Set exact tournament location" subtitle="Fans will search this area and use the coordinates for map directions." onClose={onClose}><form onSubmit={submit}><div className="modal-body"><div className="form-grid"><label className="field field-wide"><span>Venue / ground</span><input name="venueName" defaultValue={tournament.venueName} required/></label><label className="field field-wide"><span>Street address</span><input name="addressLine1" defaultValue={tournament.addressLine1} required/></label><label className="field"><span>Locality / area</span><input name="locality" defaultValue={tournament.locality} required/></label><label className="field"><span>City</span><input name="city" defaultValue={tournament.city} required/></label><label className="field"><span>State</span><input name="state" defaultValue={tournament.state} required/></label><label className="field"><span>PIN code</span><input name="postalCode" defaultValue={tournament.postalCode} pattern="[0-9]{6}" maxLength={6} required/></label><label className="field"><span>Latitude</span><input name="latitude" value={coords.latitude} onChange={event=>setCoords({...coords,latitude:event.target.value})} required/></label><label className="field"><span>Longitude</span><input name="longitude" value={coords.longitude} onChange={event=>setCoords({...coords,longitude:event.target.value})} required/></label><button className="location-helper field-wide" type="button" onClick={usePosition}><MapPin size={15}/> Use my current coordinates</button></div></div><div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={busy}>{busy?<LoaderCircle className="spin" size={17}/>:<MapPin size={17}/>} Save location</button></div></form></Modal>;
-}
-
-function GenerateFixtures({ divisions, onClose, onSaved }: { divisions: Division[]; onClose: () => void; onSaved: (payload: Record<string, unknown>) => Promise<void> }) {
+function GenerateFixturesModal({
+  divisions,
+  onClose,
+  onSaved,
+}: {
+  divisions: Division[];
+  onClose: () => void;
+  onSaved: (payload: Record<string, unknown>) => Promise<void>;
+}) {
   const [busy, setBusy] = useState(false);
-  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); const form = new FormData(event.currentTarget); await onSaved({ action: "generateFixtures", divisionId: form.get("divisionId"), mode: form.get("mode"), startDate: form.get("startDate"), startTime: form.get("startTime"), pitches: form.get("pitches"), slotMinutes: form.get("slotMinutes") }); setBusy(false); };
-  return <Modal title="Generate fixtures" subtitle="Approved teams are scheduled with pitch and time constraints." onClose={onClose}><form onSubmit={submit}><div className="modal-body"><div className="form-grid">
-    <label className="field field-wide"><span>Division</span><select name="divisionId">{divisions.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
-    <label className="field"><span>Round type</span><select name="mode"><option value="round_robin">Round robin</option><option value="knockout">Knockout</option></select></label><label className="field"><span>Date</span><input name="startDate" type="date" required /></label>
-    <label className="field"><span>First kick-off</span><input name="startTime" type="time" defaultValue="09:00" required /></label><label className="field"><span>Available pitches</span><input name="pitches" type="number" min="1" max="12" defaultValue="2" /></label>
-    <label className="field field-wide"><span>Minutes between kick-offs</span><input name="slotMinutes" type="number" min="20" max="180" defaultValue="60" /></label>
-    <div className="smart-note field-wide"><Sparkles size={18} /><div><strong>Regeneration replaces the division&apos;s current schedule.</strong><p>A live match must be completed first, protecting matchday data.</p></div></div>
-  </div></div><div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />} Generate</button></div></form></Modal>;
-}
-
-function standingsFor(division: Division | undefined, entries: Entry[], fixtures: Fixture[]) {
-  if (!division) return [];
-  const rows = new Map(entries.filter(e => e.divisionId === division.id && e.status === "approved").map(entry => [entry.id, { entry, p: 0, w: 0, d: 0, l: 0, gf: 0, ga: 0, pts: 0 }]));
-  fixtures.filter(f => f.divisionId === division.id && f.status === "completed").forEach(fixture => {
-    const home = rows.get(fixture.homeEntryId); const away = rows.get(fixture.awayEntryId); if (!home || !away) return;
-    home.p += 1; away.p += 1; home.gf += fixture.homeScore; home.ga += fixture.awayScore; away.gf += fixture.awayScore; away.ga += fixture.homeScore;
-    if (fixture.homeScore > fixture.awayScore) { home.w += 1; away.l += 1; home.pts += division.winPoints; away.pts += division.lossPoints; }
-    else if (fixture.homeScore < fixture.awayScore) { away.w += 1; home.l += 1; away.pts += division.winPoints; home.pts += division.lossPoints; }
-    else { home.d += 1; away.d += 1; home.pts += division.drawPoints; away.pts += division.drawPoints; }
-  });
-  return [...rows.values()].sort((a,b) => b.pts-a.pts || (b.gf-b.ga)-(a.gf-a.ga) || b.gf-a.gf);
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setBusy(true);
+    const form = new FormData(event.currentTarget);
+    await onSaved({
+      action: "generateFixtures",
+      divisionId: form.get("divisionId"),
+      mode: form.get("mode"),
+      startDate: form.get("startDate"),
+      startTime: form.get("startTime"),
+      pitches: form.get("pitches"),
+      slotMinutes: form.get("slotMinutes"),
+    });
+    setBusy(false);
+  };
+  return (
+    <Modal title="Generate Fixtures & Brackets" subtitle="Approved teams are scheduled with pitch and bracket slots." onClose={onClose}>
+      <form onSubmit={submit}>
+        <div className="modal-body">
+          <div className="form-grid">
+            <label className="field field-wide">
+              <span>Division</span>
+              <select name="divisionId">
+                {divisions.map((item) => (
+                  <option value={item.id} key={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>Tournament Format</span>
+              <select name="mode" defaultValue="group_knockout">
+                <option value="group_knockout">Group Stage + Knockout Bracket</option>
+                <option value="knockout">Pure Knockout Bracket</option>
+                <option value="round_robin">Round Robin League</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Start Date</span>
+              <input name="startDate" type="date" required />
+            </label>
+            <label className="field">
+              <span>First Kick-Off</span>
+              <input name="startTime" type="time" defaultValue="09:00" required />
+            </label>
+            <label className="field">
+              <span>Available Pitches</span>
+              <input name="pitches" type="number" min="1" max="12" defaultValue="2" />
+            </label>
+            <label className="field field-wide">
+              <span>Minutes Between Kick-Offs</span>
+              <input name="slotMinutes" type="number" min="20" max="180" defaultValue="60" />
+            </label>
+            <div className="smart-note field-wide">
+              <Sparkles size={18} />
+              <div>
+                <strong>Automatic Knockout Tree Generation</strong>
+                <p>Generates Group stage fixtures and links Semi-Finals, 3rd Place, and Grand Finals.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="modal-actions">
+          <button type="button" className="button secondary" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="button primary" disabled={busy}>
+            {busy ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />} Generate Schedule
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
 }
 
 export default function Dashboard({ user }: { user: ChatGPTUser }) {
-  const [view, setView] = useState<View>("Overview"); const [data, setData] = useState<AppData>(emptyData); const [selectedId, setSelectedId] = useState("");
-  const [loading, setLoading] = useState(true); const [busy, setBusy] = useState(false); const [error, setError] = useState(""); const [toast, setToast] = useState("");
-  const [sidebar, setSidebar] = useState(false); const [createOpen, setCreateOpen] = useState(false); const [teamOpen, setTeamOpen] = useState(false); const [fixtureOpen, setFixtureOpen] = useState(false);
-  const [locationTournament,setLocationTournament]=useState<Tournament>();
+  const [view, setView] = useState<View>("Overview");
+  const [data, setData] = useState<AppData>(emptyData);
+  const [selectedId, setSelectedId] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [toast, setToast] = useState("");
+  const [sidebar, setSidebar] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [teamOpen, setTeamOpen] = useState(false);
+  const [fixtureOpen, setFixtureOpen] = useState(false);
 
-  const load = useCallback(async () => { setLoading(true); try { const response = await fetch("/api/app", { cache: "no-store" }); const body = await response.json(); if (!response.ok) throw new Error(body.error || "Could not load data"); setData(body); setSelectedId(current => current && body.tournaments.some((t: Tournament) => t.id === current) ? current : body.tournaments[0]?.id || ""); setError(""); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load data"); } finally { setLoading(false); } }, []);
-  useEffect(() => { const timer = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(timer); }, [load]);
-  const act = async (payload: Record<string, unknown>) => { setBusy(true); try { const response = await fetch("/api/app", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) }); const body = await response.json(); if (!response.ok) throw new Error(body.error || "Action failed"); await load(); setCreateOpen(false); setTeamOpen(false); setFixtureOpen(false); setLocationTournament(undefined); setToast("Saved successfully"); window.setTimeout(() => setToast(""), 2800); } catch (reason) { setError(reason instanceof Error ? reason.message : "Action failed"); } finally { setBusy(false); } };
-  const selected = data.tournaments.find(item => item.id === selectedId); const selectedDivisions = data.divisions.filter(item => item.tournamentId === selectedId); const divisionIds = selectedDivisions.map(item => item.id);
-  const selectedEntries = data.entries.filter(item => divisionIds.includes(item.divisionId)); const selectedFixtures = data.fixtures.filter(item => divisionIds.includes(item.divisionId)); const selectedAnnouncements = data.announcements.filter(item => item.tournamentId === selectedId);
-  const entryMap = useMemo(() => new Map(data.entries.map(item => [item.id, item])), [data.entries]);
-  const [divisionId, setDivisionId] = useState("");
-  const effectiveDivisionId = selectedDivisions.some(item => item.id === divisionId) ? divisionId : selectedDivisions[0]?.id || "";
-  const activeDivision = selectedDivisions.find(item => item.id === effectiveDivisionId); const table = standingsFor(activeDivision, selectedEntries, selectedFixtures);
-  const activeFixture = selectedFixtures.find(item => item.status === "live") || selectedFixtures.find(item => item.status === "scheduled") || selectedFixtures[0];
-  const go = (next: View) => { setView(next); setSidebar(false); };
-  const copyRegistration = async () => { if (!selected) return; await navigator.clipboard.writeText(`${window.location.origin}/register/${selected.id}`); setToast("Registration link copied"); };
+  const activeTournament = useMemo(
+    () => data.tournaments.find((t) => t.id === selectedId) || data.tournaments[0],
+    [data.tournaments, selectedId]
+  );
 
-  if (loading && !data.tournaments.length) return <main className="loading-screen"><Logo /><LoaderCircle className="spin" size={28} /><p>Loading your tournament workspace…</p></main>;
-  return <div className="app-shell">
-    <aside className={sidebar ? "sidebar open" : "sidebar"}><div className="sidebar-top"><Logo /><button className="mobile-close" onClick={() => setSidebar(false)}><X size={20} /></button></div><button className="create-sidebar" onClick={() => setCreateOpen(true)}><Plus size={18} /> Create tournament</button><nav>{nav.map(item => { const Icon=item.icon; return <button className={view===item.label?"active":""} onClick={() => go(item.label)} key={item.label}><Icon size={19} /><span>{item.label}</span>{item.label==="Inbox" && selectedAnnouncements.length>0 && <em>{selectedAnnouncements.length}</em>}</button>; })}<a className="sidebar-discover" href="/discover"><Compass size={19}/><span>Discover & register</span></a><a className="sidebar-discover" href="/account"><Users size={19}/><span>Account settings</span></a></nav><div className="sidebar-help"><span><ShieldCheck size={17} /></span><strong>Complete organizer workspace</strong><p>Every signed-in account can create and operate tournaments.</p></div><ThemeToggle/><div className="sidebar-user"><span>{user.displayName.split(" ").map(x=>x[0]).join("").slice(0,2).toUpperCase()}</span><div><strong>{user.displayName}</strong><small>{user.email}</small></div><a href="/signout-with-chatgpt?return_to=%2Fsigned-out" aria-label="Sign out"><ArrowRight size={18} /></a></div></aside>{sidebar && <button className="sidebar-scrim" onClick={() => setSidebar(false)} />}
-    <main className="main-area"><header className="topbar"><button className="menu-button" onClick={() => setSidebar(true)}><Menu size={21} /></button><div className="page-title"><h1>{view}</h1><p>{selected ? `${selected.name} · ${selected.city}` : "Create your first competition"}</p></div>{data.tournaments.length>0 && <select className="tournament-switcher" value={selectedId} onChange={e => setSelectedId(e.target.value)}>{data.tournaments.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select>}<div className="top-actions"><button className="top-icon" onClick={() => void load()} aria-label="Refresh"><RefreshCw size={18} /></button><button className="top-icon" aria-label="Notifications"><Bell size={19} /></button><button className="mobile-create" onClick={() => setCreateOpen(true)}><Plus size={20} /></button></div></header>
-      <div className="content">{error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}><X size={16} /></button></div>}
-        {!data.tournaments.length ? <section className="empty-onboarding"><span><Trophy size={34} /></span><div><small className="eyebrow">Your database is ready</small><h1>Create your first real tournament</h1><p>Registrations, fixtures, results and announcements will persist here and remain after refresh.</p><button className="button primary" onClick={() => setCreateOpen(true)}><Plus size={17} /> Create tournament</button></div></section> : <>
-        {view === "Overview" && <><section className="hero-strip"><div className="hero-copy"><span className="eyebrow light">Organizer control centre</span><h2>{selected?.name}</h2><p>{selected && `${dateLabel(selected.startDate)} · ${selected.venueName}, ${selected.city}`}</p><button className="button light-button" onClick={() => go("Teams")}>Manage registrations <ArrowRight size={17} /></button></div><div className="hero-visual"><div className="score-float"><small>Live database</small><strong><span>{selectedEntries.length}</span> teams</strong><p>{selectedFixtures.length} fixtures published</p></div></div></section><section className="metric-grid"><article><span className="metric-icon green"><Users size={19} /></span><div><small>Registered teams</small><strong>{selectedEntries.length}</strong><p>{selectedEntries.filter(e=>e.status==="approved").length} approved</p></div></article><article><span className="metric-icon blue"><CalendarDays size={19} /></span><div><small>Fixtures</small><strong>{selectedFixtures.length}</strong><p>{selectedFixtures.filter(f=>f.status==="completed").length} completed</p></div></article><article><span className="metric-icon orange"><IndianRupee size={19} /></span><div><small>Fees recorded</small><strong>{money(selectedEntries.filter(e=>e.paymentStatus==="paid").reduce((sum,e)=>sum+e.amountPaise,0))}</strong><p>{selectedEntries.filter(e=>e.paymentStatus==="paid").length} paid</p></div></article><article><span className="metric-icon violet"><Trophy size={19} /></span><div><small>Divisions</small><strong>{selectedDivisions.length}</strong><p>{selectedDivisions.map(d=>d.name).join(", ")}</p></div></article></section><section className="panel activity-panel"><div className="section-heading"><div><span className="eyebrow">Next steps</span><h2>Run the competition</h2></div></div><div className="attention-grid"><button onClick={() => go("Teams")}><span className="attention-icon blue"><Users size={18} /></span><div><strong>Review team entries</strong><p>{selectedEntries.filter(e=>e.status==="pending").length} awaiting approval</p></div><ArrowRight size={18} /></button><button onClick={() => setFixtureOpen(true)}><span className="attention-icon purple"><Sparkles size={18} /></span><div><strong>Generate fixtures</strong><p>Use approved teams and pitch timing</p></div><ArrowRight size={18} /></button><button onClick={() => go("Matchday")}><span className="attention-icon warning"><Swords size={18} /></span><div><strong>Open matchday</strong><p>Record live scores and events</p></div><ArrowRight size={18} /></button></div></section></>}
-        {view === "Tournaments" && <><section className="page-intro"><div><span className="eyebrow">Your competitions</span><h2>Tournaments</h2><p>Exact tournament locations power fan discovery and map directions.</p></div><button className="button primary" onClick={() => setCreateOpen(true)}><Plus size={17} /> New tournament</button></section><div className="tournament-grid">{data.tournaments.map(t => { const ds=data.divisions.filter(d=>d.tournamentId===t.id); const es=data.entries.filter(e=>ds.some(d=>d.id===e.divisionId)); return <article className="tournament-card" key={t.id}><div className="card-accent" /><div className="card-topline"><span className="status status-registration"><i />{t.status.replaceAll("_"," ")}</span><button className="plain-icon" onClick={() => { if(confirm(`Delete ${t.name}? This permanently removes its teams and fixtures.`)) void act({action:"deleteTournament",tournamentId:t.id}); }}><Trash2 size={17} /></button></div><div className="trophy-orb"><Trophy size={23} /></div><h3>{t.name}</h3><p><MapPin size={14} />{t.addressLine1?`${t.venueName}, ${t.locality}, ${t.city}, ${t.state} – ${t.postalCode}`:`${t.venueName}, ${t.city} · Location incomplete`}</p>{!t.addressLine1&&<button className="location-warning" onClick={()=>setLocationTournament(t)}><MapPin size={14}/> Complete exact location to appear in Discover</button>}<div className="tag-row">{ds.map(d=><span key={d.id}>{d.name}</span>)}</div><div className="card-metrics"><div><small>Starts</small><strong>{dateLabel(t.startDate)}</strong></div><div><small>Teams</small><strong>{es.length}</strong></div></div><button className="card-link" onClick={() => {setSelectedId(t.id);go("Overview");}}>Open workspace <ArrowRight size={16} /></button></article>; })}</div></>}
-        {view === "Teams" && <><section className="page-intro"><div><span className="eyebrow">Registration management</span><h2>Teams</h2><p>Approve entries, record fee status and share the public form.</p></div><div className="page-actions"><button className="button secondary" onClick={copyRegistration}><ClipboardCopy size={16} /> Copy registration link</button><button className="button primary" onClick={() => setTeamOpen(true)}><Plus size={17} /> Add team</button></div></section><section className="panel table-panel"><div className="table-toolbar"><div className="inner-search"><Search size={17} /><span>{selectedEntries.length} registrations across {selectedDivisions.length} divisions</span></div></div><div className="responsive-table"><table><thead><tr><th>Team</th><th>Division</th><th>Contact</th><th>Payment</th><th>Approval</th><th>Registered</th></tr></thead><tbody>{selectedEntries.length ? selectedEntries.map(entry => <tr key={entry.id}><td><div className="team-cell"><span>{entry.teamName.slice(0,2).toUpperCase()}</span><div><strong>{entry.teamName}</strong><small>{entry.clubName} · {entry.city}</small></div></div></td><td><span className="neutral-pill">{data.divisions.find(d=>d.id===entry.divisionId)?.name}</span></td><td><strong>{entry.contactName}</strong><br/><small>{entry.contactPhone}</small></td><td><select className="inline-select" value={entry.paymentStatus} onChange={e=>void act({action:"updateEntry",entryId:entry.id,paymentStatus:e.target.value,status:entry.status})}><option value="unpaid">Unpaid</option><option value="paid">Paid</option><option value="waived">Waived</option></select></td><td><select className="inline-select" value={entry.status} onChange={e=>void act({action:"updateEntry",entryId:entry.id,status:e.target.value,paymentStatus:entry.paymentStatus})}><option value="pending">Pending</option><option value="approved">Approved</option><option value="waitlisted">Waitlisted</option><option value="withdrawn">Withdrawn</option></select></td><td>{timeLabel(entry.registeredAt)}</td></tr>) : <tr><td colSpan={6}><div className="table-empty"><Users size={24} /><strong>No teams yet</strong><p>Add one manually or share the registration link.</p></div></td></tr>}</tbody></table></div></section></>}
-        {view === "Fixtures" && <><section className="page-intro"><div><span className="eyebrow">Competition schedule</span><h2>Fixtures</h2><p>Generated from approved entries and saved immediately.</p></div><button className="button primary" onClick={() => setFixtureOpen(true)}><Sparkles size={17} /> Generate fixtures</button></section><div className="division-tabs">{selectedDivisions.map(d=><button className={effectiveDivisionId===d.id?"active":""} onClick={()=>setDivisionId(d.id)} key={d.id}>{d.name}</button>)}</div><section className="panel schedule-panel"><div className="section-heading"><div><span className="eyebrow">{activeDivision?.format.replaceAll("_"," ")}</span><h2>{activeDivision?.name} schedule</h2></div><span className="neutral-pill">{selectedFixtures.filter(f=>f.divisionId===effectiveDivisionId).length} matches</span></div><div className="timeline generated">{selectedFixtures.filter(f=>f.divisionId===effectiveDivisionId).map(f => <div className="timeline-row" key={f.id}><span className="fixture-status-dot" /><div className="time-node"><strong>{timeLabel(f.kickoffAt).split(", ").slice(-1)}</strong><small>{timeLabel(f.kickoffAt).split(", ")[0]} · Pitch {f.pitch}</small></div><div className="fixture-teams"><span><b>{entryMap.get(f.homeEntryId)?.teamName.slice(0,2).toUpperCase()}</b>{entryMap.get(f.homeEntryId)?.teamName}</span><em>{f.status==="completed"?`${f.homeScore}–${f.awayScore}`:"vs"}</em><span><b>{entryMap.get(f.awayEntryId)?.teamName.slice(0,2).toUpperCase()}</b>{entryMap.get(f.awayEntryId)?.teamName}</span></div><span className="rest-ok">{f.roundName}</span></div>)}{!selectedFixtures.some(f=>f.divisionId===effectiveDivisionId)&&<div className="table-empty"><CalendarDays size={24}/><strong>No fixtures generated</strong><p>Approve at least two teams, then generate the schedule.</p></div>}</div></section></>}
-        {view === "Matchday" && <><section className="page-intro"><div><span className="eyebrow live-label"><i /> Match operations</span><h2>Matchday</h2><p>Scores and match events write directly to the tournament record.</p></div></section>{activeFixture ? <Matchday fixture={activeFixture} home={entryMap.get(activeFixture.homeEntryId)} away={entryMap.get(activeFixture.awayEntryId)} events={data.events.filter(e=>e.fixtureId===activeFixture.id)} act={act} /> : <section className="empty-onboarding compact-empty"><span><Swords size={30}/></span><div><h2>No fixture is ready</h2><p>Generate fixtures first, then return here to operate the match.</p><button className="button primary" onClick={()=>setFixtureOpen(true)}>Generate fixtures</button></div></section>}</>}
-        {view === "Standings" && <><section className="page-intro"><div><span className="eyebrow">Calculated automatically</span><h2>Standings</h2><p>Only completed fixtures contribute to the table.</p></div></section><div className="division-tabs">{selectedDivisions.map(d=><button className={effectiveDivisionId===d.id?"active":""} onClick={()=>setDivisionId(d.id)} key={d.id}>{d.name}</button>)}</div><section className="panel table-panel standings-panel"><div className="responsive-table"><table><thead><tr><th>#</th><th>Team</th><th>P</th><th>W</th><th>D</th><th>L</th><th>GF</th><th>GA</th><th>GD</th><th>PTS</th></tr></thead><tbody>{table.map((row,index)=><tr className={index<2?"qualifies":""} key={row.entry.id}><td><strong>{index+1}</strong></td><td><div className="team-cell"><span>{row.entry.teamName.slice(0,2).toUpperCase()}</span><div><strong>{row.entry.teamName}</strong><small>{row.entry.clubName}</small></div></div></td><td>{row.p}</td><td>{row.w}</td><td>{row.d}</td><td>{row.l}</td><td>{row.gf}</td><td>{row.ga}</td><td>{row.gf-row.ga}</td><td><strong>{row.pts}</strong></td></tr>)}{!table.length&&<tr><td colSpan={10}><div className="table-empty"><BarChart3 size={24}/><strong>No approved teams</strong><p>Standings appear as soon as teams are approved.</p></div></td></tr>}</tbody></table></div></section></>}
-        {view === "Inbox" && <Inbox tournament={selected!} announcements={selectedAnnouncements} act={act} />}
-        </>}</div></main>
-    {createOpen&&<CreateTournament onClose={()=>setCreateOpen(false)} onSaved={act}/>} {teamOpen&&<AddTeam divisions={selectedDivisions} onClose={()=>setTeamOpen(false)} onSaved={act}/>} {fixtureOpen&&<GenerateFixtures divisions={selectedDivisions} onClose={()=>setFixtureOpen(false)} onSaved={act}/>} {locationTournament&&<SetLocation tournament={locationTournament} onClose={()=>setLocationTournament(undefined)} onSaved={act}/>} {toast&&<div className="toast"><span className="toast-icon"><Check size={16}/></span><span>{toast}</span><button onClick={()=>setToast("")}><X size={15}/></button></div>} {busy&&<div className="busy-chip"><LoaderCircle className="spin" size={15}/> Saving</div>}
-  </div>;
-}
+  const activeDivisions = useMemo(
+    () => data.divisions.filter((d) => d.tournamentId === activeTournament?.id),
+    [data.divisions, activeTournament]
+  );
 
-function Matchday({ fixture, home, away, events, act }: { fixture: Fixture; home?: Entry; away?: Entry; events: MatchEvent[]; act: (payload: Record<string, unknown>) => Promise<void> }) {
-  const [minute,setMinute]=useState(0); const update=(h:number,a:number,status=fixture.status)=>act({action:"updateScore",fixtureId:fixture.id,homeScore:Math.max(0,h),awayScore:Math.max(0,a),status});
-  const event=(entryId:string,type:string)=>act({action:"addEvent",fixtureId:fixture.id,entryId,type,matchMinute:minute});
-  return <><div className="matchday-grid"><section className="live-scoreboard"><div className="scoreboard-top"><span>{fixture.roundName} · Pitch {fixture.pitch}</span><span className="live-chip"><i />{fixture.status.toUpperCase()}</span></div><div className="score-main"><div className="score-team"><span className="crest blue-crest">{home?.teamName.slice(0,2).toUpperCase()}</span><h3>{home?.teamName}</h3></div><div className="score-centre"><strong><button onClick={()=>void update(fixture.homeScore+1,fixture.awayScore,"live")}>{fixture.homeScore}</button><em>:</em><button onClick={()=>void update(fixture.homeScore,fixture.awayScore+1,"live")}>{fixture.awayScore}</button></strong><span>{minute}&apos;</span><small>{fixture.status}</small></div><div className="score-team"><span className="crest orange-crest">{away?.teamName.slice(0,2).toUpperCase()}</span><h3>{away?.teamName}</h3></div></div><div className="match-clock"><div><button onClick={()=>void update(fixture.homeScore,fixture.awayScore,"live")}>Start / resume</button><button onClick={()=>void update(fixture.homeScore,fixture.awayScore,"completed")}>Finish match</button></div><span><Clock3 size={14}/>{timeLabel(fixture.kickoffAt)}</span></div></section><section className="panel event-controls"><div className="section-heading"><div><span className="eyebrow">Match events</span><h2>Record event</h2></div></div><label className="field minute-input"><span>Match minute</span><input type="number" min="0" max="200" value={minute} onChange={e=>setMinute(Number(e.target.value))}/></label><div className="event-buttons"><button onClick={()=>home&&void event(home.id,"goal")}><span className="event-symbol goal"><CircleDot size={20}/></span><strong>{home?.teamName} goal</strong></button><button onClick={()=>away&&void event(away.id,"goal")}><span className="event-symbol goal"><CircleDot size={20}/></span><strong>{away?.teamName} goal</strong></button><button onClick={()=>home&&void event(home.id,"yellow_card")}><span className="event-symbol yellow"/><strong>Home yellow</strong></button><button onClick={()=>away&&void event(away.id,"yellow_card")}><span className="event-symbol yellow"/><strong>Away yellow</strong></button></div></section></div><section className="panel event-feed"><div className="section-heading"><div><span className="eyebrow">Persisted timeline</span><h2>Match events</h2></div></div><div className="event-list">{events.map(e=><div key={e.id}><time>{e.matchMinute}&apos;</time><span className={e.type==="yellow_card"?"feed-icon yellow-card":"feed-icon"}>{e.type==="goal"&&<CircleDot size={15}/>}</span><p><strong>{e.type.replaceAll("_"," ")}</strong><small>{e.entryId===fixture.homeEntryId?home?.teamName:away?.teamName}</small></p></div>)}{!events.length&&<div><p><strong>No events recorded yet</strong><small>Use the controls above during the match.</small></p></div>}</div></section></>;
-}
+  const activeDivisionIds = useMemo(() => new Set(activeDivisions.map((d) => d.id)), [activeDivisions]);
 
-function Inbox({ tournament, announcements, act }: { tournament: Tournament; announcements: Announcement[]; act: (payload: Record<string, unknown>) => Promise<void> }) {
-  const [body,setBody]=useState(""); const send=async(e:FormEvent)=>{e.preventDefault(); if(!body.trim())return; await act({action:"sendAnnouncement",tournamentId:tournament.id,body});setBody("");};
-  return <><section className="page-intro"><div><span className="eyebrow">Participant communication</span><h2>Announcements</h2><p>Messages remain attached to the tournament record.</p></div></section><div className="inbox-grid single-inbox"><section className="panel conversations">{announcements.map(a=><div className="conversation active" key={a.id}><span>MF</span><div><strong>All participants</strong><p>{a.body}</p></div><em>{timeLabel(a.createdAt)}</em></div>)}{!announcements.length&&<div className="table-empty"><MessageSquareText size={24}/><strong>No announcements yet</strong></div>}</section><section className="panel composer"><div className="composer-head"><div><span className="broadcast-avatar"><Users size={19}/></span><div><strong>{tournament.name} participants</strong><small>Saved announcement channel</small></div></div></div><div className="messages">{announcements.slice(0,4).reverse().map(a=><div className="sent-message" key={a.id}><p>{a.body}</p><span>{timeLabel(a.createdAt)}</span></div>)}</div><form className="message-compose" onSubmit={send}><input value={body} onChange={e=>setBody(e.target.value)} placeholder="Write an announcement…" maxLength={2000}/><button className="send-button"><Send size={18}/></button></form></section></div></>;
+  const activeEntries = useMemo(
+    () => data.entries.filter((e) => activeDivisionIds.has(e.divisionId)),
+    [data.entries, activeDivisionIds]
+  );
+
+  const activeFixtures = useMemo(
+    () => data.fixtures.filter((f) => activeDivisionIds.has(f.divisionId)),
+    [data.fixtures, activeDivisionIds]
+  );
+
+  const activeEvents = useMemo(() => {
+    const fixIds = new Set(activeFixtures.map((f) => f.id));
+    return data.events.filter((e) => fixIds.has(e.fixtureId));
+  }, [data.events, activeFixtures]);
+
+  const refreshData = useCallback(async () => {
+    try {
+      setLoading(true);
+      const res = await fetch("/api/app");
+      if (!res.ok) throw new Error("Failed to load tournament data");
+      const json = await res.json();
+      setData(json);
+      if (json.tournaments?.length && !selectedId) {
+        setSelectedId(json.tournaments[0].id);
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "An error occurred");
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedId]);
+
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      try {
+        setLoading(true);
+        const res = await fetch("/api/app");
+        if (!res.ok) throw new Error("Failed to load tournament data");
+        const json = await res.json();
+        if (mounted) {
+          setData(json);
+          if (json.tournaments?.length && !selectedId) {
+            setSelectedId(json.tournaments[0].id);
+          }
+        }
+      } catch (err: unknown) {
+        if (mounted) {
+          setError(err instanceof Error ? err.message : "An error occurred");
+        }
+      } finally {
+        if (mounted) {
+          setLoading(false);
+        }
+      }
+    };
+    void load();
+    return () => {
+      mounted = false;
+    };
+  }, [selectedId]);
+
+  const handleSaveAction = async (payload: Record<string, unknown>) => {
+    try {
+      setBusy(true);
+      const res = await fetch("/api/app", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Action failed");
+      setToast("Operation updated successfully!");
+      setTimeout(() => setToast(""), 4000);
+      await refreshData();
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Error performing action");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleOpenMatchday = (_fixtureId: string) => {
+    setView("Matchday");
+  };
+
+  return (
+    <div className="min-h-screen bg-background text-foreground flex">
+      {/* Sidebar */}
+      <aside
+        className={`fixed inset-y-0 left-0 z-50 w-64 bg-card border-r border-border flex flex-col transition-transform duration-300 ${
+          sidebar ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
+        }`}
+      >
+        <div className="p-5 border-b border-border flex items-center justify-between">
+          <Logo />
+          <button className="lg:hidden p-1.5 text-muted-foreground" onClick={() => setSidebar(false)}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="p-4 border-b border-border">
+          <span className="text-[11px] uppercase tracking-wider font-bold text-muted-foreground block mb-2">
+            Active Competition
+          </span>
+          <select
+            value={activeTournament?.id || ""}
+            onChange={(e) => setSelectedId(e.target.value)}
+            className="w-full text-xs font-bold bg-muted/60 p-2.5 rounded-xl border border-border focus:outline-none cursor-pointer"
+          >
+            {data.tournaments.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name} ({t.city})
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
+          {nav.map((item) => {
+            const Icon = item.icon;
+            const active = view === item.label;
+            return (
+              <button
+                key={item.label}
+                onClick={() => {
+                  setView(item.label);
+                  setSidebar(false);
+                }}
+                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-semibold transition ${
+                  active
+                    ? "bg-primary text-primary-foreground shadow-md shadow-primary/20"
+                    : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <Icon size={18} />
+                  <span>{item.label}</span>
+                </div>
+                {item.badge && (
+                  <span
+                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                      active
+                        ? "bg-primary-foreground/20 text-primary-foreground"
+                        : "bg-primary/15 text-primary"
+                    }`}
+                  >
+                    {item.badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Platform Roles Portals */}
+        <div className="p-3 border-t border-border space-y-1">
+          <span className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground px-2 block mb-1">
+            Platform Roles
+          </span>
+          <a
+            href="/coach"
+            className="flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
+          >
+            <ShieldCheck size={16} className="text-emerald-500" />
+            <span>Coach Portal</span>
+          </a>
+          <a
+            href="/referee"
+            className="flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
+          >
+            <Clock3 size={16} className="text-amber-500" />
+            <span>Referee Console</span>
+          </a>
+          <a
+            href={activeTournament ? `/tournament/${activeTournament.id}` : "/discover"}
+            className="flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
+          >
+            <Globe size={16} className="text-primary" />
+            <span>Public Showcase</span>
+          </a>
+        </div>
+
+        <div className="p-4 border-t border-border flex items-center justify-between text-xs text-muted-foreground">
+          <div className="truncate">
+            <strong className="block text-foreground truncate">{user.displayName}</strong>
+            <span className="truncate">{user.email}</span>
+          </div>
+          <ThemeToggle />
+        </div>
+      </aside>
+
+      {/* Main Content Area */}
+      <main className="flex-1 lg:ml-64 flex flex-col min-h-screen">
+        {/* Top Header */}
+        <header className="sticky top-0 z-40 bg-background/80 backdrop-blur-md border-b border-border px-4 lg:px-8 py-4 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <button className="lg:hidden p-2 rounded-lg bg-muted" onClick={() => setSidebar(true)}>
+              <Menu size={18} />
+            </button>
+            <div>
+              <span className="text-xs uppercase tracking-wider text-muted-foreground font-semibold">Organizer Hub</span>
+              <h1 className="text-lg font-extrabold text-foreground flex items-center gap-2">
+                {activeTournament?.name || "MyFootball India"}
+              </h1>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <a
+              href="/coach"
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-border text-xs font-bold hover:bg-muted transition"
+            >
+              <ShieldCheck size={14} className="text-emerald-500" /> Coach
+            </a>
+            <a
+              href="/referee"
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-border text-xs font-bold hover:bg-muted transition"
+            >
+              <Clock3 size={14} className="text-amber-500" /> Referee
+            </a>
+            {activeTournament && (
+              <a
+                href={`/tournament/${activeTournament.id}`}
+                className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-border text-xs font-bold hover:bg-muted transition"
+              >
+                <Globe size={14} className="text-primary" /> Public Hub
+              </a>
+            )}
+            <button
+              onClick={() => setCreateOpen(true)}
+              className="button primary inline-flex items-center gap-1.5 text-xs px-3.5 py-2"
+            >
+              <Plus size={15} /> New Tournament
+            </button>
+            <button
+              onClick={refreshData}
+              disabled={loading}
+              className="p-2 rounded-xl border border-border hover:bg-muted text-muted-foreground transition"
+              title="Refresh Data"
+            >
+              <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+            </button>
+          </div>
+        </header>
+
+        {/* Toast Notification */}
+        {toast && (
+          <div className="fixed bottom-6 right-6 z-50 p-4 rounded-2xl bg-slate-900 text-white shadow-2xl border border-slate-700 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-4 duration-200">
+            <Sparkles size={18} className="text-amber-400" />
+            <span className="text-sm font-semibold">{toast}</span>
+          </div>
+        )}
+
+        {/* Error Banner */}
+        {error && (
+          <div className="mx-4 lg:mx-8 mt-4 p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-600 dark:text-rose-400 text-xs font-semibold flex items-center justify-between">
+            <span>{error}</span>
+            <button onClick={() => setError("")} className="p-1 hover:bg-rose-500/20 rounded">
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
+        {/* Tab Body */}
+        <div className="flex-1 p-4 lg:p-8 space-y-6 max-w-7xl w-full mx-auto">
+          {/* TAB 1: OVERVIEW */}
+          {view === "Overview" && (
+            <div className="space-y-6">
+              {/* Active Tournament Hero Banner */}
+              <div className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-emerald-950 via-slate-900 to-slate-950 text-white p-6 sm:p-8 border border-emerald-500/20 shadow-xl">
+                <div className="relative z-10 space-y-4 max-w-2xl">
+                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-400 text-xs font-bold border border-emerald-500/30">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                    LIVE COMPETITION HUB
+                  </div>
+                  <h2 className="text-2xl sm:text-4xl font-black tracking-tight">{activeTournament?.name}</h2>
+                  <p className="text-slate-300 text-sm sm:text-base">
+                    {activeTournament?.venueName}, {activeTournament?.locality}, {activeTournament?.city} • {activeTournament?.durationDays} Days Event
+                  </p>
+                  <div className="flex flex-wrap gap-3 pt-2">
+                    <button
+                      onClick={() => setView("Matchday")}
+                      className="button primary inline-flex items-center gap-2 text-sm px-4 py-2.5"
+                    >
+                      <Swords size={16} /> Open Live Matchday Console
+                    </button>
+                    <button
+                      onClick={() => setView("Brackets")}
+                      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 font-bold text-sm text-white border border-slate-700 transition"
+                    >
+                      <Trophy size={16} className="text-amber-400" /> View Elimination Bracket
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* KPI Stat Cards */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="panel-card p-5 rounded-2xl bg-card border border-border space-y-2">
+                  <div className="flex items-center justify-between text-muted-foreground">
+                    <span className="text-xs uppercase font-bold tracking-wider">Divisions</span>
+                    <Trophy size={18} className="text-primary" />
+                  </div>
+                  <div className="font-mono font-black text-3xl text-foreground">{activeDivisions.length}</div>
+                  <span className="text-xs text-muted-foreground">Age categories configured</span>
+                </div>
+
+                <div className="panel-card p-5 rounded-2xl bg-card border border-border space-y-2">
+                  <div className="flex items-center justify-between text-muted-foreground">
+                    <span className="text-xs uppercase font-bold tracking-wider">Registered Teams</span>
+                    <ShieldCheck size={18} className="text-emerald-500" />
+                  </div>
+                  <div className="font-mono font-black text-3xl text-foreground">{activeEntries.length}</div>
+                  <span className="text-xs text-muted-foreground">Clubs & academies</span>
+                </div>
+
+                <div className="panel-card p-5 rounded-2xl bg-card border border-border space-y-2">
+                  <div className="flex items-center justify-between text-muted-foreground">
+                    <span className="text-xs uppercase font-bold tracking-wider">Player Rosters</span>
+                    <Users size={18} className="text-blue-500" />
+                  </div>
+                  <div className="font-mono font-black text-3xl text-foreground">{data.players.length}</div>
+                  <span className="text-xs text-muted-foreground">Players registered in pool</span>
+                </div>
+
+                <div className="panel-card p-5 rounded-2xl bg-card border border-border space-y-2">
+                  <div className="flex items-center justify-between text-muted-foreground">
+                    <span className="text-xs uppercase font-bold tracking-wider">Match Events</span>
+                    <TrendingUp size={18} className="text-amber-500" />
+                  </div>
+                  <div className="font-mono font-black text-3xl text-foreground">{activeEvents.length}</div>
+                  <span className="text-xs text-muted-foreground">Goals, cards & subs recorded</span>
+                </div>
+              </div>
+
+              {/* Quick Jump Modules */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Recent Fixtures / Live Matches */}
+                <div className="panel-card p-6 rounded-2xl bg-card border border-border space-y-4">
+                  <div className="flex items-center justify-between pb-3 border-b border-border">
+                    <h3 className="font-bold text-base text-foreground flex items-center gap-2">
+                      <Swords size={18} className="text-primary" /> Key Match Highlights
+                    </h3>
+                    <button onClick={() => setView("Brackets")} className="text-xs text-primary font-bold hover:underline">
+                      View All
+                    </button>
+                  </div>
+                  <div className="space-y-3">
+                    {activeFixtures.slice(0, 4).map((f) => {
+                      const h = activeEntries.find((e) => e.id === f.homeEntryId);
+                      const a = activeEntries.find((e) => e.id === f.awayEntryId);
+                      return (
+                        <div
+                          key={f.id}
+                          className="flex items-center justify-between p-3 rounded-xl bg-muted/40 hover:bg-muted/70 transition border border-border"
+                        >
+                          <div className="space-y-1">
+                            <span className="text-[10px] uppercase font-bold text-muted-foreground">{f.roundName}</span>
+                            <div className="font-bold text-sm text-foreground">
+                              {h?.teamName || "TBD"} vs {a?.teamName || "TBD"}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span className="font-mono font-black text-base text-foreground">
+                              {f.status === "completed" || f.status === "in_progress"
+                                ? `${f.homeScore} - ${f.awayScore}`
+                                : "vs"}
+                            </span>
+                            <button
+                              onClick={() => handleOpenMatchday(f.id)}
+                              className="text-xs px-2.5 py-1 rounded-lg bg-primary/10 text-primary font-bold hover:bg-primary/20 transition"
+                            >
+                              Console
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Tournament Standings Snapshot */}
+                <div className="panel-card p-6 rounded-2xl bg-card border border-border space-y-4">
+                  <div className="flex items-center justify-between pb-3 border-b border-border">
+                    <h3 className="font-bold text-base text-foreground flex items-center gap-2">
+                      <BarChart3 size={18} className="text-primary" /> Standings Preview
+                    </h3>
+                    <button onClick={() => setView("Standings")} className="text-xs text-primary font-bold hover:underline">
+                      Full Tables
+                    </button>
+                  </div>
+                  <div className="space-y-2">
+                    {activeEntries.slice(0, 5).map((entry, i) => (
+                      <div key={entry.id} className="flex items-center justify-between p-2.5 rounded-xl bg-muted/30">
+                        <div className="flex items-center gap-3">
+                          <span className="font-mono font-bold text-xs text-muted-foreground w-4">{i + 1}</span>
+                          <strong className="text-sm text-foreground">{entry.teamName}</strong>
+                          <span className="text-xs text-muted-foreground">({entry.groupName})</span>
+                        </div>
+                        <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                          {entry.status.toUpperCase()}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 2: TOURNAMENTS */}
+          {view === "Tournaments" && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-xl font-extrabold text-foreground">Your Tournaments</h2>
+                  <p className="text-xs text-muted-foreground">Manage tournament information and exact venue locations.</p>
+                </div>
+                <button onClick={() => setCreateOpen(true)} className="button primary inline-flex items-center gap-2 text-sm">
+                  <Plus size={16} /> Create Tournament
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {data.tournaments.map((t) => (
+                  <div key={t.id} className="panel-card p-6 rounded-2xl bg-card border border-border space-y-4 shadow-sm">
+                    <div className="flex items-center justify-between">
+                      <span className="px-2.5 py-1 rounded-full bg-primary/10 text-primary font-bold text-xs">
+                        {t.status.replace("_", " ").toUpperCase()}
+                      </span>
+                      <span className="text-xs text-muted-foreground">Starts {dateLabel(t.startDate)}</span>
+                    </div>
+
+                    <div>
+                      <h3 className="font-black text-xl text-foreground">{t.name}</h3>
+                      <p className="text-xs text-muted-foreground mt-1">Organized by {t.organizedBy}</p>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-muted/40 text-xs space-y-1.5 border border-border">
+                      <div className="flex items-center gap-2 text-foreground font-semibold">
+                        <MapPin size={14} className="text-primary" /> {t.venueName}
+                      </div>
+                      <div className="text-muted-foreground">
+                        {t.addressLine1}, {t.locality}, {t.city}, {t.state} - {t.postalCode}
+                      </div>
+                      <div className="text-[11px] font-mono text-muted-foreground">
+                        GPS: {t.latitude}, {t.longitude}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-2">
+                      <button
+                        onClick={() => {
+                          setSelectedId(t.id);
+                          setView("Overview");
+                        }}
+                        className="button secondary text-xs px-3 py-1.5"
+                      >
+                        Select Competition
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (confirm(`Delete tournament "${t.name}"?`)) {
+                            handleSaveAction({ action: "deleteTournament", tournamentId: t.id });
+                          }
+                        }}
+                        className="p-2 text-muted-foreground hover:text-rose-500 transition"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* TAB 3: TEAMS */}
+          {view === "Teams" && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-xl font-extrabold text-foreground">Registered Teams</h2>
+                  <p className="text-xs text-muted-foreground">Approve team entries and assign group stages.</p>
+                </div>
+                <button onClick={() => setTeamOpen(true)} className="button primary inline-flex items-center gap-2 text-sm">
+                  <Plus size={16} /> Register Team
+                </button>
+              </div>
+
+              <div className="panel-card rounded-2xl p-5 bg-card border border-border overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border text-xs uppercase text-muted-foreground text-left">
+                      <th className="py-2.5 px-3">Team & Club</th>
+                      <th className="py-2.5 px-3">City</th>
+                      <th className="py-2.5 px-3">Assigned Group</th>
+                      <th className="py-2.5 px-3">Contact</th>
+                      <th className="py-2.5 px-3">Payment</th>
+                      <th className="py-2.5 px-3">Status</th>
+                      <th className="py-2.5 px-3 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {activeEntries.map((entry) => (
+                      <tr key={entry.id} className="hover:bg-muted/30 transition">
+                        <td className="py-3 px-3">
+                          <div className="flex items-center gap-2">
+                            <Shield size={16} className="text-primary" />
+                            <div>
+                              <strong className="text-foreground">{entry.teamName}</strong>
+                              <div className="text-[11px] text-muted-foreground">{entry.clubName}</div>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="py-3 px-3 text-muted-foreground">{entry.city}</td>
+                        <td className="py-3 px-3 font-semibold text-foreground">{entry.groupName}</td>
+                        <td className="py-3 px-3 text-xs text-muted-foreground">
+                          {entry.contactName}
+                          <div className="font-mono text-[10px]">{entry.contactPhone}</div>
+                        </td>
+                        <td className="py-3 px-3">
+                          <span
+                            className={`text-xs px-2 py-0.5 rounded-full font-bold uppercase ${
+                              entry.paymentStatus === "paid"
+                                ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                                : "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                            }`}
+                          >
+                            {entry.paymentStatus}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3">
+                          <span
+                            className={`text-xs px-2 py-0.5 rounded-full font-bold uppercase ${
+                              entry.status === "approved"
+                                ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                                : "bg-slate-500/15 text-slate-400"
+                            }`}
+                          >
+                            {entry.status}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 text-right">
+                          <button
+                            onClick={() => {
+                              setSelectedId(activeTournament.id);
+                              setView("Squads");
+                            }}
+                            className="text-xs px-2.5 py-1 rounded bg-primary/10 text-primary font-bold hover:bg-primary/20 transition"
+                          >
+                            Manage Squad
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 4: SQUADS & ROSTERS (STEP 1) */}
+          {view === "Squads" && (
+            <SquadManager
+              divisions={activeDivisions}
+              entries={activeEntries}
+              players={data.players}
+              squadMembers={data.squadMembers}
+              onSaveAction={handleSaveAction}
+            />
+          )}
+
+          {/* TAB 5: BRACKETS & KNOCKOUT TREE (STEP 1) */}
+          {view === "Brackets" && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-xl font-extrabold text-foreground">Elimination Brackets & Fixtures</h2>
+                  <p className="text-xs text-muted-foreground">Interactive tournament trees with automatic winner progression.</p>
+                </div>
+                <button onClick={() => setFixtureOpen(true)} className="button primary inline-flex items-center gap-2 text-sm">
+                  <Sparkles size={16} /> Generate Schedule
+                </button>
+              </div>
+
+              <KnockoutBracket
+                divisions={activeDivisions}
+                entries={activeEntries}
+                fixtures={activeFixtures}
+                onSaveAction={handleSaveAction}
+                onOpenMatchday={handleOpenMatchday}
+              />
+            </div>
+          )}
+
+          {/* TAB 6: PITCH-SIDE LIVE MATCHDAY CONSOLE (STEP 1) */}
+          {view === "Matchday" && (
+            <LiveMatchConsole
+              divisions={activeDivisions}
+              entries={activeEntries}
+              fixtures={activeFixtures}
+              events={activeEvents}
+              players={data.players}
+              squadMembers={data.squadMembers}
+              onSaveAction={handleSaveAction}
+            />
+          )}
+
+          {/* TAB 7: STANDINGS & GROUP TABLES (STEP 1) */}
+          {view === "Standings" && (
+            <StandingsView
+              divisions={activeDivisions}
+              entries={activeEntries}
+              fixtures={activeFixtures}
+            />
+          )}
+
+          {/* TAB 8: STATS & HONORS (STEP 1) */}
+          {view === "Stats" && (
+            <LeaderboardsView
+              divisions={activeDivisions}
+              entries={activeEntries}
+              fixtures={activeFixtures}
+              events={activeEvents}
+              players={data.players}
+            />
+          )}
+
+          {/* TAB 9: INBOX / ANNOUNCEMENTS */}
+          {view === "Inbox" && (
+            <div className="space-y-6">
+              <div className="panel-card p-6 rounded-2xl bg-card border border-border space-y-4">
+                <h3 className="font-bold text-base text-foreground flex items-center gap-2">
+                  <Send size={18} className="text-primary" /> Broadcast Announcement
+                </h3>
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    const form = new FormData(e.currentTarget);
+                    await handleSaveAction({
+                      action: "sendAnnouncement",
+                      tournamentId: activeTournament.id,
+                      body: form.get("body"),
+                      audience: form.get("audience"),
+                    });
+                    (e.target as HTMLFormElement).reset();
+                  }}
+                  className="space-y-4"
+                >
+                  <textarea
+                    name="body"
+                    placeholder="Type urgent match updates, pitch changes, or tournament broadcast..."
+                    required
+                    rows={3}
+                    className="w-full p-3 rounded-xl bg-muted/40 border border-border text-foreground text-sm focus:outline-none"
+                  />
+                  <div className="flex items-center justify-between">
+                    <select name="audience" className="text-xs bg-muted p-2 rounded-xl border border-border text-foreground">
+                      <option value="all_participants">All Participants & Fans</option>
+                      <option value="coaches_only">Team Managers Only</option>
+                    </select>
+                    <button className="button primary text-xs px-4 py-2 inline-flex items-center gap-2">
+                      <Send size={14} /> Send Broadcast
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              <div className="space-y-3">
+                {data.announcements
+                  .filter((a) => a.tournamentId === activeTournament?.id)
+                  .map((a) => (
+                    <div key={a.id} className="p-4 rounded-2xl bg-card border border-border space-y-1">
+                      <div className="flex items-center justify-between text-xs text-muted-foreground">
+                        <span className="font-semibold text-primary">{a.audience.toUpperCase()}</span>
+                        <span>{timeLabel(a.createdAt)}</span>
+                      </div>
+                      <p className="text-sm text-foreground">{a.body}</p>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </main>
+
+      {/* Modals */}
+      {createOpen && <CreateTournament onClose={() => setCreateOpen(false)} onSaved={handleSaveAction} />}
+      {teamOpen && <AddTeamModal divisions={activeDivisions} onClose={() => setTeamOpen(false)} onSaved={handleSaveAction} />}
+      {fixtureOpen && (
+        <GenerateFixturesModal divisions={activeDivisions} onClose={() => setFixtureOpen(false)} onSaved={handleSaveAction} />
+      )}
+    </div>
+  );
 }

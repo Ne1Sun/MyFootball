@@ -1,9 +1,15 @@
-import { and, eq } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "../../../../../db";
 import {
+  announcements,
   clubs,
   divisions,
   entries,
+  fixtures,
+  follows,
+  matchEvents,
+  players,
+  squadMembers,
   teams,
   tournaments,
 } from "../../../../../db/schema";
@@ -25,32 +31,84 @@ export async function GET(
       .from(tournaments)
       .where(eq(tournaments.id, id))
       .limit(1);
-    if (!tournament || tournament.status !== "registration_open")
-      return Response.json(
-        { error: "Registration is not available." },
-        { status: 404 },
-      );
+
+    if (!tournament) {
+      return Response.json({ error: "Tournament not found" }, { status: 404 });
+    }
+
     const divisionRows = await db
       .select()
       .from(divisions)
-      .where(eq(divisions.tournamentId, id));
-    const counts = await Promise.all(
-      divisionRows.map(async (division) => {
-        const rows = await db
-          .select({ id: entries.id })
+      .where(eq(divisions.tournamentId, id))
+      .orderBy(asc(divisions.createdAt));
+
+    const divisionIds = divisionRows.map((d) => d.id);
+
+    const entryRows = divisionIds.length
+      ? await db
+          .select({
+            id: entries.id,
+            divisionId: entries.divisionId,
+            teamId: entries.teamId,
+            clubId: clubs.id,
+            status: entries.status,
+            paymentStatus: entries.paymentStatus,
+            seed: entries.seed,
+            groupName: entries.groupName,
+            teamName: teams.name,
+            clubName: clubs.name,
+            city: clubs.city,
+          })
           .from(entries)
-          .where(eq(entries.divisionId, division.id));
-        return { divisionId: division.id, registered: rows.length };
-      }),
-    );
+          .innerJoin(teams, eq(entries.teamId, teams.id))
+          .innerJoin(clubs, eq(teams.clubId, clubs.id))
+          .where(and(inArray(entries.divisionId, divisionIds), eq(entries.status, "approved")))
+      : [];
+
+    const fixtureRows = divisionIds.length
+      ? await db
+          .select()
+          .from(fixtures)
+          .where(inArray(fixtures.divisionId, divisionIds))
+          .orderBy(asc(fixtures.kickoffAt), asc(fixtures.pitch))
+      : [];
+
+    const fixtureIds = fixtureRows.map((f) => f.id);
+
+    const eventRows = fixtureIds.length
+      ? await db
+          .select()
+          .from(matchEvents)
+          .where(inArray(matchEvents.fixtureId, fixtureIds))
+          .orderBy(desc(matchEvents.matchMinute), desc(matchEvents.createdAt))
+      : [];
+
+    const announcementRows = await db
+      .select()
+      .from(announcements)
+      .where(eq(announcements.tournamentId, id))
+      .orderBy(desc(announcements.createdAt));
+
+    const signedIn = await getChatGPTUser();
+    let isFollowed = false;
+    if (signedIn) {
+      const [follow] = await db
+        .select()
+        .from(follows)
+        .where(and(eq(follows.userEmail, signedIn.email), eq(follows.tournamentId, id)))
+        .limit(1);
+      isFollowed = Boolean(follow);
+    }
+
     return Response.json({
       tournament,
-      divisions: divisionRows.map((division) => ({
-        ...division,
-        registered:
-          counts.find((item) => item.divisionId === division.id)?.registered ??
-          0,
-      })),
+      divisions: divisionRows,
+      entries: entryRows,
+      fixtures: fixtureRows,
+      events: eventRows,
+      announcements: announcementRows,
+      isFollowed,
+      user: signedIn,
     });
   } catch (error) {
     return apiError(error);
@@ -78,7 +136,7 @@ export async function POST(
       .limit(1);
     if (!tournament)
       return Response.json(
-        { error: "Registration is closed." },
+        { error: "Registration is closed for this tournament." },
         { status: 404 },
       );
     const divisionId = clean(payload.divisionId, 50);

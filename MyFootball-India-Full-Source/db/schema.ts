@@ -42,6 +42,8 @@ export const divisions = sqliteTable("divisions", {
   format: text("format").notNull().default("group_knockout"),
   maxSquadSize: integer("max_squad_size").notNull().default(18),
   maxTeams: integer("max_teams").notNull().default(16),
+  groupsCount: integer("groups_count").notNull().default(2),
+  teamsAdvancingPerGroup: integer("teams_advancing_per_group").notNull().default(2),
   feePaise: integer("fee_paise").notNull().default(0),
   feeBasis: text("fee_basis").notNull().default("per_team"),
   requirePlayers: integer("require_players", { mode: "boolean" }).notNull().default(false),
@@ -66,6 +68,20 @@ export const clubs = sqliteTable("clubs", {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [index("clubs_owner_idx").on(table.ownerEmail)]);
 
+export const players = sqliteTable("players", {
+  id: text("id").primaryKey(),
+  clubId: text("club_id").notNull().references(() => clubs.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  dateOfBirth: text("date_of_birth"),
+  jerseyNumber: integer("jersey_number").notNull().default(0),
+  position: text("position").notNull().default("MID"),
+  isCaptain: integer("is_captain", { mode: "boolean" }).notNull().default(false),
+  photoUrl: text("photo_url").notNull().default(""),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  index("players_club_idx").on(table.clubId),
+]);
+
 export const teams = sqliteTable("teams", {
   id: text("id").primaryKey(),
   clubId: text("club_id").notNull().references(() => clubs.id, { onDelete: "cascade" }),
@@ -81,6 +97,7 @@ export const entries = sqliteTable("entries", {
   paymentStatus: text("payment_status").notNull().default("unpaid"),
   amountPaise: integer("amount_paise").notNull().default(0),
   seed: integer("seed"),
+  groupName: text("group_name").notNull().default("Group A"),
   notes: text("notes").notNull().default(""),
   registeredAt: text("registered_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   approvedAt: text("approved_at"),
@@ -89,18 +106,40 @@ export const entries = sqliteTable("entries", {
   index("entries_division_status_idx").on(table.divisionId, table.status),
 ]);
 
+export const squadMembers = sqliteTable("squad_members", {
+  id: text("id").primaryKey(),
+  entryId: text("entry_id").notNull().references(() => entries.id, { onDelete: "cascade" }),
+  playerId: text("player_id").notNull().references(() => players.id, { onDelete: "cascade" }),
+  isStarting: integer("is_starting", { mode: "boolean" }).notNull().default(false),
+  jerseyNumberOverride: integer("jersey_number_override"),
+  positionOverride: text("position_override"),
+  registeredAt: text("registered_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  uniqueIndex("squad_members_entry_player_uq").on(table.entryId, table.playerId),
+  index("squad_members_entry_idx").on(table.entryId),
+]);
+
 export const fixtures = sqliteTable("fixtures", {
   id: text("id").primaryKey(),
   divisionId: text("division_id").notNull().references(() => divisions.id, { onDelete: "cascade" }),
   roundNumber: integer("round_number").notNull(),
   roundName: text("round_name").notNull(),
+  stage: text("stage").notNull().default("group"),
+  bracketRound: text("bracket_round"),
+  bracketMatchIndex: integer("bracket_match_index"),
   homeEntryId: text("home_entry_id").notNull().references(() => entries.id, { onDelete: "cascade" }),
   awayEntryId: text("away_entry_id").notNull().references(() => entries.id, { onDelete: "cascade" }),
   kickoffAt: text("kickoff_at").notNull(),
   pitch: integer("pitch").notNull().default(1),
   status: text("status").notNull().default("scheduled"),
+  period: text("period").notNull().default("scheduled"),
+  matchClockMinute: integer("match_clock_minute").notNull().default(0),
   homeScore: integer("home_score").notNull().default(0),
   awayScore: integer("away_score").notNull().default(0),
+  homeScorePenalties: integer("home_score_penalties").notNull().default(0),
+  awayScorePenalties: integer("away_score_penalties").notNull().default(0),
+  potmPlayerId: text("potm_player_id"),
+  potmPlayerName: text("potm_player_name").notNull().default(""),
   publishedAt: text("published_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [index("fixtures_division_kickoff_idx").on(table.divisionId, table.kickoffAt)]);
@@ -111,8 +150,13 @@ export const matchEvents = sqliteTable("match_events", {
   entryId: text("entry_id").notNull().references(() => entries.id, { onDelete: "cascade" }),
   type: text("type").notNull(),
   playerName: text("player_name").notNull().default(""),
+  playerId: text("player_id"),
+  assistPlayerName: text("assist_player_name").notNull().default(""),
+  assistPlayerId: text("assist_player_id"),
   relatedPlayerName: text("related_player_name").notNull().default(""),
   matchMinute: integer("match_minute").notNull().default(0),
+  matchPeriod: text("match_period").notNull().default("first_half"),
+  cardReason: text("card_reason").notNull().default(""),
   recordedBy: text("recorded_by").notNull(),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [index("events_fixture_minute_idx").on(table.fixtureId, table.matchMinute)]);

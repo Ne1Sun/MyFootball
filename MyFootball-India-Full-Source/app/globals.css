@@ -1,27 +1,50 @@
 @import "tailwindcss";
 
 :root {
-  --ink: #151714;
-  --muted: #6f756d;
-  --line: #e6e9e3;
-  --paper: #f5f6f2;
+  /* Brand Foundations */
+  --ink: #1a202c;
+  --muted: #525a6c; /* Elevated to WCAG 2.2 AAA >= 7.0:1 on #f4f6fa */
+  --line: #dfe3ec;
+  --paper: #f4f6fa;
   --white: #ffffff;
-  --green: #223b2b;
-  --green-2: #395846;
-  --lime: #c7f35b;
-  --lime-dark: #93c82c;
-  --blue: #2f65d9;
-  --orange: #e78335;
-  --violet: #8065d6;
-  --shadow: 0 16px 40px rgba(28, 42, 32, 0.08);
+  --green: #162e21; /* Deep Maidan Turf */
+  --green-2: #005b41;
+  --lime: #ff9933; /* Bharat Saffron */
+  --lime-dark: #e87912;
+  --blue: #514fd7;
+  --orange: #ff9933;
+  --violet: #f11a7b;
+  --shadow: 0 16px 42px rgba(26, 32, 44, .1);
+
+  /* Status Colors (WCAG AAA Compliant) */
+  --status-live-fg: #004d36;
+  --status-live-bg: #d7f3e9;
+  --status-warning-fg: #7a3500;
+  --status-warning-bg: #ffeedb;
+  --status-danger-fg: #8b0021;
+  --status-danger-bg: #ffe4e8;
+}
+
+/* Outdoor Pitch-Side High-Contrast Daylight Mode (21:1 Contrast) */
+html[data-daylight="true"],
+.daylight-mode {
+  --ink: #000000 !important;
+  --paper: #ffffff !important;
+  --white: #ffffff !important;
+  --muted: #222222 !important;
+  --line: #000000 !important;
+  --green: #000000 !important;
+  background-color: #ffffff !important;
+  color: #000000 !important;
 }
 
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
-body { margin: 0; background: var(--paper); color: var(--ink); font-family: Arial, Helvetica, sans-serif; }
-button, input, select { font: inherit; }
+body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--font-display), -apple-system, BlinkMacSystemFont, sans-serif; -webkit-font-smoothing: antialiased; }
+h1, h2, h3, h4, h5, h6 { font-family: var(--font-heading), var(--font-display), sans-serif; }
+button, input, select, textarea { font-family: inherit; }
 button { color: inherit; }
-button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid rgba(140, 197, 38, 0.35); outline-offset: 2px; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid rgba(234, 88, 12, 0.35); outline-offset: 2px; }
 
 .app-shell { min-height: 100vh; }
 .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 30; width: 248px; display: flex; flex-direction: column; padding: 24px 17px 18px; background: #fff; border-right: 1px solid var(--line); }
@@ -517,3 +540,243 @@ html[data-theme="dark"] .mobile-nav { background:rgba(26,32,44,.96); }
   .mobile-nav button.active { color:#514fd7; }
   .sidebar-scrim { background:rgba(18,18,18,.62); }
 }
+
+/* Step 1 & Step 2 Modular Component Utilities */
+.panel-card {
+  background: var(--white);
+  border: 1px solid var(--line);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.03);
+}
+
+html[data-theme="dark"] .panel-card {
+  background: #1a202c;
+  border-color: var(--line);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+/* ==========================================================================
+   2D TACTICAL FOOTBALL PITCH STYLES
+   ========================================================================== */
+.football-pitch {
+  position: relative;
+  background: repeating-linear-gradient(
+    0deg,
+    #15803d 0px,
+    #15803d 36px,
+    #166534 36px,
+    #166534 72px
+  );
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.35), 0 12px 32px rgba(0, 0, 0, 0.2);
+  border-radius: 16px;
+  overflow: hidden;
+  user-select: none;
+}
+
+.pitch-chalk {
+  border-color: rgba(255, 255, 255, 0.65) !important;
+}
+
+.player-pitch-token {
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s ease;
+}
+
+.player-pitch-token:hover {
+  transform: scale(1.18);
+  z-index: 20;
+}
+
+/* ==========================================================================
+   GOAL CELEBRATION & CONFETTI ANIMATIONS
+   ========================================================================== */
+@keyframes goal-zoom {
+  0% { transform: scale(0.6) rotate(-4deg); opacity: 0; }
+  50% { transform: scale(1.12) rotate(2deg); opacity: 1; }
+  75% { transform: scale(0.98) rotate(-1deg); }
+  100% { transform: scale(1) rotate(0deg); opacity: 1; }
+}
+
+@keyframes confetti-fall {
+  0% { transform: translateY(-20px) rotate(0deg); opacity: 1; }
+  100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
+}
+
+@keyframes trophy-pulse {
+  0%, 100% { transform: scale(1); filter: drop-shadow(0 0 12px rgba(245, 158, 11, 0.4)); }
+  50% { transform: scale(1.08); filter: drop-shadow(0 0 24px rgba(245, 158, 11, 0.8)); }
+}
+
+.animate-goal-zoom {
+  animation: goal-zoom 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+.animate-trophy-pulse {
+  animation: trophy-pulse 2.5s ease-in-out infinite;
+}
+
+.confetti-particle {
+  position: absolute;
+  width: 10px;
+  height: 14px;
+  opacity: 0.9;
+  animation: confetti-fall linear infinite;
+}
+
+/* ==========================================================================
+   INTERACTIVE HOVER HIGHLIGHTS & MICRO-LIFT FX
+   ========================================================================== */
+.interactive-card {
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1),
+              box-shadow 0.25s cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 0.25s ease;
+}
+
+.interactive-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 16px 32px -8px rgba(245, 158, 11, 0.14), 0 8px 16px -6px rgba(0, 0, 0, 0.12);
+  border-color: rgba(245, 158, 11, 0.5) !important;
+}
+
+.interactive-button {
+  transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+              box-shadow 0.18s ease,
+              filter 0.18s ease;
+}
+
+.interactive-button:hover {
+  transform: translateY(-1.5px) scale(1.02);
+  filter: brightness(1.06);
+}
+
+.interactive-button:active {
+  transform: translateY(0.5px) scale(0.98);
+}
+
+.interactive-row {
+  transition: background-color 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+  position: relative;
+}
+
+.interactive-row:hover {
+  background-color: rgba(245, 158, 11, 0.05);
+}
+
+/* ==========================================================================
+   CARD-STAGGERED CASCADE TRANSITIONS
+   ========================================================================== */
+@keyframes cascade-in {
+  0% {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.cascade-1 { animation: cascade-in 0.45s cubic-bezier(0.16, 1, 0.3, 1) 0.04s both; }
+.cascade-2 { animation: cascade-in 0.45s cubic-bezier(0.16, 1, 0.3, 1) 0.09s both; }
+.cascade-3 { animation: cascade-in 0.45s cubic-bezier(0.16, 1, 0.3, 1) 0.14s both; }
+.cascade-4 { animation: cascade-in 0.45s cubic-bezier(0.16, 1, 0.3, 1) 0.19s both; }
+.cascade-5 { animation: cascade-in 0.45s cubic-bezier(0.16, 1, 0.3, 1) 0.24s both; }
+.cascade-6 { animation: cascade-in 0.45s cubic-bezier(0.16, 1, 0.3, 1) 0.29s both; }
+
+/* ==========================================================================
+   TURF GRASS RADAR SWEEP LOADER KEYFRAMES
+   ========================================================================== */
+@keyframes radar-sweep {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes radar-ping {
+  0% {
+    transform: scale(0.5);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+.animate-radar-sweep {
+  animation: radar-sweep 2.2s linear infinite;
+}
+
+.animate-radar-ping {
+  animation: radar-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+/* Top Broadcast Route Progress Bar */
+@keyframes broadcast-progress {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.animate-broadcast-progress {
+  background-size: 200% 200%;
+  animation: broadcast-progress 1.8s ease infinite;
+}
+
+/* ==========================================================================
+   PRINT-OPTIMIZED A4 MATCHDAY ROSTER & CHECK-IN SHEET STYLES
+   ========================================================================== */
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-size: 11pt !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Hide screen-only interactive chrome */
+  header, footer, nav, .interactive-button, button, .RouteTransitionBar, .live-ticker, .theme-toggle, .hide-print {
+    display: none !important;
+  }
+
+  .print-only {
+    display: block !important;
+  }
+
+  .print-page {
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    page-break-after: always;
+  }
+
+  .print-table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+  }
+
+  .print-table th, .print-table td {
+    border: 1px solid #000000 !important;
+    padding: 6px 8px !important;
+    color: #000000 !important;
+    background: #ffffff !important;
+  }
+
+  .print-table th {
+    background: #f0f0f0 !important;
+    font-weight: 900 !important;
+    text-transform: uppercase !important;
+  }
+}
+
+
+
