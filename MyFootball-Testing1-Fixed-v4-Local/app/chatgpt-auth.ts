@@ -34,6 +34,22 @@ export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
     };
   }
 
+  // The hosted Sites dispatcher supplies the authentication headers and owns
+  // /signin-with-chatgpt. A normal localhost Vite server has neither, so use
+  // the seeded demo organizer only on loopback during development.
+  const host = requestHeaders.get("host")?.split(":")[0];
+  const isLocalDevelopment =
+    process.env.NODE_ENV === "development" &&
+    (host === "localhost" || host === "127.0.0.1");
+
+  if (isLocalDevelopment) {
+    return {
+      displayName: "Demo Organizer",
+      email: "demo@myfootball.in",
+      fullName: "Demo Organizer",
+    };
+  }
+
   return null;
 }
 
