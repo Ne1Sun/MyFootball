@@ -28,5 +28,6 @@ export function apiError(error: unknown) {
       { status: 503 },
     );
   }
-  return Response.json({ error: message }, { status: 500 });
+  console.error("MyFootball API error", error);
+  return Response.json({ error: "We could not complete that request. Please try again." }, { status: 500 });
 }

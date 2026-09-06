@@ -34,6 +34,10 @@ export type Division = {
   winPoints: number;
   drawPoints: number;
   lossPoints: number;
+  matchDurationMinutes: number;
+  halfTimeBreakMinutes: number;
+  bufferMinutes: number;
+  minRestMinutes: number;
   ageCutoffDate?: string | null;
 };
 

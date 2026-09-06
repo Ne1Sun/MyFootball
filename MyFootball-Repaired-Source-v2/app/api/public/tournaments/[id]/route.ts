@@ -14,7 +14,7 @@ import {
   tournaments,
 } from "../../../../../db/schema";
 import { getChatGPTUser } from "../../../../chatgpt-auth";
-import { apiError } from "../../../../lib/server";
+import { apiError, requireApiUser } from "../../../../lib/server";
 
 const clean = (value: unknown, max = 255) =>
   typeof value === "string" ? value.trim().slice(0, max) : "";
@@ -33,6 +33,9 @@ export async function GET(
       .limit(1);
 
     if (!tournament) {
+      return Response.json({ error: "Tournament not found" }, { status: 404 });
+    }
+    if (!["registration_open", "registration_closed", "scheduled", "live", "completed"].includes(tournament.status)) {
       return Response.json({ error: "Tournament not found" }, { status: 404 });
     }
 
@@ -122,7 +125,8 @@ export async function POST(
   try {
     const { id } = await context.params;
     const payload = (await request.json()) as Record<string, unknown>;
-    const signedIn = await getChatGPTUser();
+    const signedIn = await requireApiUser();
+    if (!signedIn) return Response.json({ error: "Sign in to register a team." }, { status: 401 });
     const db = getDb();
     const [tournament] = await db
       .select()
@@ -139,6 +143,9 @@ export async function POST(
         { error: "Registration is closed for this tournament." },
         { status: 404 },
       );
+    if (tournament.registrationClosesAt && Date.parse(tournament.registrationClosesAt) <= Date.now()) {
+      return Response.json({ error: "Registration has closed for this tournament." }, { status: 409 });
+    }
     const divisionId = clean(payload.divisionId, 50);
     const [division] = await db
       .select()
@@ -168,19 +175,21 @@ export async function POST(
         { error: "Complete all required fields." },
         { status: 400 },
       );
-    const clubId = crypto.randomUUID();
+    const [existingClub] = await db.select().from(clubs)
+      .where(and(eq(clubs.ownerEmail, signedIn.email), eq(clubs.name, clubName))).limit(1);
+    const clubId = existingClub?.id ?? crypto.randomUUID();
     const teamId = crypto.randomUUID();
     const entryId = crypto.randomUUID();
-    await db.batch([
-      db.insert(clubs).values({
+    if (!existingClub) await db.insert(clubs).values({
         id: clubId,
-        ownerEmail: signedIn?.email ?? null,
+        ownerEmail: signedIn.email,
         name: clubName,
         organizationType: clean(payload.organizationType, 30) || "club",
         city: clean(payload.city, 100),
         contactName,
         contactPhone,
-      }),
+      });
+    await db.batch([
       db.insert(teams).values({ id: teamId, clubId, name: teamName }),
       db.insert(entries).values({
         id: entryId,
@@ -195,7 +204,7 @@ export async function POST(
     return Response.json(
       {
         entryId,
-        linkedToAccount: Boolean(signedIn),
+        linkedToAccount: true,
         message: "Registration submitted for organizer approval.",
       },
       { status: 201 },

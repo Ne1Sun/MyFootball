@@ -429,35 +429,8 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
 
   const handleScoreAdjust = async (isHome: boolean, delta: number) => {
     if (!currentFixture) return;
-    triggerHaptic([40]);
-    setBusy(true);
-
-    const newHome = isHome ? Math.max(0, currentFixture.homeScore + delta) : currentFixture.homeScore;
-    const newAway = !isHome ? Math.max(0, currentFixture.awayScore + delta) : currentFixture.awayScore;
-
-    // Write-Ahead to WAL immediately (SEC-06)
-    persistCurrentWAL({
-      homeScore: newHome,
-      awayScore: newAway,
-    });
-
-    try {
-      await fetch("/api/app", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "updateLiveMatch",
-          fixtureId: currentFixture.id,
-          homeScore: newHome,
-          awayScore: newAway,
-        }),
-      });
-    } catch {
-      // WAL has recorded score
-    }
-
-    await refreshData();
-    setBusy(false);
+    setToast("Record or correct the underlying match event; direct score edits are disabled.");
+    setTimeout(() => setToast(""), 4000);
   };
 
   // --- FIFA 5-KICK + SUDDEN DEATH STATE MACHINE HANDLER (SEC-01) ---
@@ -788,7 +761,8 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
       }
     }
 
-    await handleUpdateClock(90, "completed", "completed");
+    const division = data.divisions.find((item) => item.id === currentFixture.divisionId);
+    await handleUpdateClock(division?.matchDurationMinutes || 90, "completed", "completed");
     clearWAL(currentFixture.id); // Clean up WAL when match is officially completed
     setToast("Official match report submitted & whistle blown!");
     setTimeout(() => setToast(""), 3000);

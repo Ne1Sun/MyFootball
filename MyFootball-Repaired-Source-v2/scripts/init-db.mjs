@@ -99,7 +99,9 @@ for (const file of files) {
   const countResult = countStmt.get();
   console.log("Player count in DB:", countResult.count);
 
-  if (countResult.count === 0) {
+  // Production databases start empty. Rich sample data is opt-in for a local
+  // developer demonstration only; it must never appear in a real tournament.
+  if (process.env.MYFOOTBALL_SEED_DEMO === "1" && countResult.count === 0) {
     console.log("Seeding rich Indian football tournament ecosystem (players, squads, brackets)...");
     const now = new Date().toISOString();
 

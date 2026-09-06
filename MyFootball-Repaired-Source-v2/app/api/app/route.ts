@@ -581,7 +581,7 @@ export async function POST(request: Request) {
       const squadList = Array.isArray(payload.squad) ? payload.squad : [];
 
       if (!entryId) return Response.json({ error: "Entry ID required" }, { status: 400 });
-      const [entryContext] = await db.select({ entry: entries, division: divisions, ownerEmail: clubs.ownerEmail })
+      const [entryContext] = await db.select({ entry: entries, division: divisions, ownerEmail: clubs.ownerEmail, clubId: clubs.id })
         .from(entries).innerJoin(divisions, eq(entries.divisionId, divisions.id)).innerJoin(teams, eq(entries.teamId, teams.id))
         .innerJoin(clubs, eq(teams.clubId, clubs.id)).where(eq(entries.id, entryId)).limit(1);
       if (!entryContext || (entryContext.ownerEmail !== user.email && !(await ownedDivision(entryContext.entry.divisionId, user.email)))) {
@@ -593,7 +593,8 @@ export async function POST(request: Request) {
       if (squadList.length > entryContext.division.maxSquadSize) return Response.json({ error: "Squad exceeds the division maximum." }, { status: 400 });
       const playerIds = squadList.map((item) => clean((item as Record<string, unknown>).playerId, 50));
       if (new Set(playerIds).size !== playerIds.length || playerIds.some((id) => !id)) return Response.json({ error: "Every squad player must be selected once." }, { status: 400 });
-      const ownedPlayers = playerIds.length ? await db.select({ id: players.id }).from(players).where(inArray(players.id, playerIds)) : [];
+      const ownedPlayers = playerIds.length ? await db.select({ id: players.id }).from(players)
+        .where(and(inArray(players.id, playerIds), eq(players.clubId, entryContext.clubId))) : [];
       if (ownedPlayers.length !== playerIds.length) return Response.json({ error: "A selected player does not exist." }, { status: 400 });
 
       // Delete existing squad assignments for this entry
@@ -820,6 +821,16 @@ export async function POST(request: Request) {
       const fixture = official.fixture;
       const validPeriods = ["scheduled", "first_half", "half_time", "second_half", "extra_time", "penalties", "completed"];
       if (period && !validPeriods.includes(period)) return Response.json({ error: "Invalid match period." }, { status: 400 });
+      const transitions: Record<string, string[]> = {
+        scheduled: ["scheduled", "first_half"],
+        first_half: ["first_half", "half_time"],
+        half_time: ["half_time", "second_half"],
+        second_half: ["second_half", "extra_time", "penalties", "completed"],
+        extra_time: ["extra_time", "penalties", "completed"],
+        penalties: ["penalties", "completed"],
+        completed: ["completed"],
+      };
+      if (period && !transitions[fixture.period].includes(period)) return Response.json({ error: "Invalid match-state transition." }, { status: 409 });
       if (matchClockMinute > maxMinuteForPeriod(period || fixture.period, Math.ceil(official.division.matchDurationMinutes / 2))) {
         return Response.json({ error: "Clock exceeds the configured match duration for this period." }, { status: 400 });
       }
@@ -827,13 +838,17 @@ export async function POST(request: Request) {
       if (status === "completed" && !["second_half", "extra_time", "penalties", "completed"].includes(period || fixture.period)) {
         return Response.json({ error: "A match cannot finish before the second half." }, { status: 400 });
       }
+      if (status === "completed" && (period || fixture.period) === "second_half" && matchClockMinute < official.division.matchDurationMinutes) {
+        return Response.json({ error: "The configured match duration has not elapsed." }, { status: 400 });
+      }
+      if (homeScore !== undefined || awayScore !== undefined) {
+        return Response.json({ error: "Scores are calculated from official match events and cannot be edited directly." }, { status: 400 });
+      }
 
       const updateData: Record<string, unknown> = {};
       if (status) updateData.status = status;
       if (period) updateData.period = period;
       if (matchClockMinute !== undefined) updateData.matchClockMinute = Math.max(0, matchClockMinute);
-      if (homeScore !== undefined) updateData.homeScore = Math.max(0, homeScore);
-      if (awayScore !== undefined) updateData.awayScore = Math.max(0, awayScore);
 
       await db.update(fixtures).set(updateData).where(eq(fixtures.id, fixtureId));
       return Response.json({ ok: true });
