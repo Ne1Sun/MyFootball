@@ -165,6 +165,30 @@ export const matchEvents = sqliteTable("match_events", {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [index("events_fixture_minute_idx").on(table.fixtureId, table.matchMinute)]);
 
+/** Individual kick records keep shootouts authoritative across devices. */
+export const shootoutKicks = sqliteTable("shootout_kicks", {
+  id: text("id").primaryKey(),
+  fixtureId: text("fixture_id").notNull().references(() => fixtures.id, { onDelete: "cascade" }),
+  entryId: text("entry_id").notNull().references(() => entries.id, { onDelete: "cascade" }),
+  playerId: text("player_id").notNull().references(() => players.id, { onDelete: "cascade" }),
+  sequence: integer("sequence").notNull(),
+  scored: integer("scored", { mode: "boolean" }).notNull(),
+  recordedBy: text("recorded_by").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [uniqueIndex("shootout_kicks_fixture_sequence_uq").on(table.fixtureId, table.sequence)]);
+
+/** Append-only operational history for sensitive competition decisions. */
+export const auditLog = sqliteTable("audit_log", {
+  id: text("id").primaryKey(),
+  tournamentId: text("tournament_id").notNull().references(() => tournaments.id, { onDelete: "cascade" }),
+  actorEmail: text("actor_email").notNull(),
+  action: text("action").notNull(),
+  entityType: text("entity_type").notNull(),
+  entityId: text("entity_id").notNull(),
+  detail: text("detail").notNull().default(""),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [index("audit_log_tournament_created_idx").on(table.tournamentId, table.createdAt)]);
+
 export const announcements = sqliteTable("announcements", {
   id: text("id").primaryKey(),
   tournamentId: text("tournament_id").notNull().references(() => tournaments.id, { onDelete: "cascade" }),
