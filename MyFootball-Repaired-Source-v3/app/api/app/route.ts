@@ -86,6 +86,18 @@ async function playerCanBeUsed(entryId: string, playerId: string) {
   return Boolean(member);
 }
 
+async function playerIsOnField(fixtureId: string, entryId: string, playerId: string) {
+  const db = getDb();
+  const [member] = await db.select().from(squadMembers)
+    .where(and(eq(squadMembers.entryId, entryId), eq(squadMembers.playerId, playerId))).limit(1);
+  if (!member) return false;
+  const events = await db.select().from(matchEvents)
+    .where(and(eq(matchEvents.fixtureId, fixtureId), eq(matchEvents.entryId, entryId), eq(matchEvents.type, "substitution")));
+  const substitutedOut = events.some((event) => event.playerId === playerId);
+  const substitutedIn = events.some((event) => event.assistPlayerId === playerId);
+  return (member.isStarting || substitutedIn) && !substitutedOut;
+}
+
 export async function GET() {
   try {
     const user = await requireApiUser();
@@ -831,6 +843,16 @@ export async function POST(request: Request) {
         completed: ["completed"],
       };
       if (period && !transitions[fixture.period].includes(period)) return Response.json({ error: "Invalid match-state transition." }, { status: 409 });
+      if (period === "first_half" && fixture.period === "scheduled" && official.division.requirePlayers) {
+        const requiredStarters = Math.min(7, official.division.maxSquadSize);
+        const starters = await db.select({ entryId: squadMembers.entryId }).from(squadMembers)
+          .where(and(inArray(squadMembers.entryId, [fixture.homeEntryId, fixture.awayEntryId]), eq(squadMembers.isStarting, true)));
+        const homeStarters = starters.filter((member) => member.entryId === fixture.homeEntryId).length;
+        const awayStarters = starters.filter((member) => member.entryId === fixture.awayEntryId).length;
+        if (homeStarters < requiredStarters || awayStarters < requiredStarters) {
+          return Response.json({ error: `Each team needs at least ${requiredStarters} named starters before kick-off.` }, { status: 409 });
+        }
+      }
       if (matchClockMinute > maxMinuteForPeriod(period || fixture.period, Math.ceil(official.division.matchDurationMinutes / 2))) {
         return Response.json({ error: "Clock exceeds the configured match duration for this period." }, { status: 400 });
       }
@@ -857,7 +879,7 @@ export async function POST(request: Request) {
     if (payload.action === "recordDetailedMatchEvent") {
       const fixtureId = clean(payload.fixtureId, 50);
       const entryId = clean(payload.entryId, 50);
-      const type = clean(payload.type, 30); // "goal", "yellow_card", "red_card", "substitution", "penalty_miss"
+      let type = clean(payload.type, 30); // "goal", "yellow_card", "red_card", "substitution", "penalty_miss"
       const playerName = clean(payload.playerName, 100);
       const playerId = clean(payload.playerId, 50) || null;
       const assistPlayerName = clean(payload.assistPlayerName, 100);
@@ -879,11 +901,20 @@ export async function POST(request: Request) {
       if (["goal", "penalty_goal", "yellow_card", "red_card", "substitution"].includes(type) && !playerId) return Response.json({ error: "Select a registered player." }, { status: 400 });
       if (type === "yellow_card" && playerId) {
         const cautions = await db.select({ id: matchEvents.id }).from(matchEvents).where(and(eq(matchEvents.fixtureId, fixtureId), eq(matchEvents.playerId, playerId), eq(matchEvents.type, "yellow_card")));
-        if (cautions.length >= 1) return Response.json({ error: "This player already has a yellow card and must be dismissed instead." }, { status: 409 });
+        if (cautions.length >= 1) type = "red_card";
       }
       if (playerId) {
         const dismissed = await db.select({ id: matchEvents.id }).from(matchEvents).where(and(eq(matchEvents.fixtureId, fixtureId), eq(matchEvents.playerId, playerId), eq(matchEvents.type, "red_card"))).limit(1);
         if (dismissed.length) return Response.json({ error: "A dismissed player cannot take further part in the match." }, { status: 409 });
+      }
+      if (["goal", "penalty_goal", "own_goal", "yellow_card", "red_card"].includes(type) && playerId && !(await playerIsOnField(fixtureId, entryId, playerId))) {
+        return Response.json({ error: "This player is not currently on the field." }, { status: 409 });
+      }
+      if (type === "substitution") {
+        const incomingPlayerId = assistPlayerId;
+        if (!playerId || !incomingPlayerId || playerId === incomingPlayerId || !(await playerIsOnField(fixtureId, entryId, playerId)) || !(await playerCanBeUsed(entryId, incomingPlayerId)) || await playerIsOnField(fixtureId, entryId, incomingPlayerId)) {
+          return Response.json({ error: "A substitution needs one active player out and one eligible bench player in." }, { status: 400 });
+        }
       }
 
       const eventId = crypto.randomUUID();
