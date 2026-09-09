@@ -235,6 +235,23 @@ export function TournamentShowcaseClient({ initialData }: { initialData: PublicT
                   {regBadge.label}
                 </span>
 
+                {/* Match Playing Format Badge */}
+                <span
+                  className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-black border ${
+                    tournament.teamFormat === "5v5"
+                      ? "bg-cyan-500/20 text-cyan-400 border-cyan-500/40"
+                      : tournament.teamFormat === "7v7"
+                      ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40"
+                      : "bg-amber-500/20 text-amber-400 border-amber-500/40"
+                  }`}
+                >
+                  {tournament.teamFormat === "5v5"
+                    ? "⚡ 5v5 Turf Cup"
+                    : tournament.teamFormat === "7v7"
+                    ? "🌱 7v7 Grassroots"
+                    : "🏆 11v11 Full Pitch"}
+                </span>
+
                 <span className="text-xs text-slate-400 font-medium hidden sm:inline">
                   {tournament.city}, {tournament.state}
                 </span>

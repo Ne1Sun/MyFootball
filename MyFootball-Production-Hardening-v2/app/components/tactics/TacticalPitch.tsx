@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowUp,
   Award,
   Crown,
   Filter,
@@ -31,6 +32,7 @@ export interface TacticalPitchProps {
   onSwapPlayer?: (playerOnPitchId: string, benchPlayerId: string) => void;
   onSwapPitchPositions?: (player1Id: string, player2Id: string) => void;
   onBenchPlayer?: (playerId: string) => void;
+  initialPitchView?: "half" | "full";
 }
 
 type SlotCoordinate = {
@@ -245,9 +247,11 @@ export function TacticalPitch({
   onSwapPlayer,
   onSwapPitchPositions,
   onBenchPlayer,
+  initialPitchView = "half",
 }: TacticalPitchProps) {
   const [internalFormation, setInternalFormation] = useState<Formation>("4-3-3");
   const activeFormation: Formation = propFormation || internalFormation;
+  const [pitchView, setPitchView] = useState<"half" | "full">(initialPitchView);
 
   const [selectedPitchPlayer, setSelectedPitchPlayer] = useState<Player | null>(null);
   const [benchPositionFilter, setBenchPositionFilter] = useState<string>("ALL");
@@ -356,17 +360,25 @@ export function TacticalPitch({
           ? customSlotMap[player.id]
           : slotIndex;
       const slot = allSlots[activeSlotIndex] || allSlots[slotIndex] || allSlots[0];
+
+      // In "half" view, coordinates span the team's half (y: 16% - 88%)
+      // In "full" view, compress coordinates to strictly occupy the defending half (y: 54% - 86%)
+      const yCoord =
+        pitchView === "full"
+          ? 52 + (slot.y / 100) * 36
+          : slot.y;
+
       return {
         player,
         slotIndex: activeSlotIndex,
         x: slot.x,
-        y: slot.y,
+        y: yCoord,
         role: slot.role,
         lineSize: slot.lineSize,
         lineIndex: slot.lineIndex,
       };
     });
-  }, [startingPlayers, formationSlots, customSlotMap]);
+  }, [startingPlayers, formationSlots, customSlotMap, pitchView]);
 
   const handlePlayerClick = (player: Player) => {
     if (!isInteractive) return;
@@ -455,6 +467,36 @@ export function TacticalPitch({
 
         {/* Tactical Actions & Formation Selector */}
         <div className="flex items-center flex-wrap gap-2">
+          {/* Pitch Perspective Switcher */}
+          <div className="flex items-center gap-1 p-1 rounded-xl bg-muted/70 border border-border text-xs">
+            <button
+              type="button"
+              onClick={() => setPitchView("half")}
+              aria-label="Half Pitch View (Team's Half)"
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition min-h-[32px] ${
+                pitchView === "half"
+                  ? "bg-primary text-primary-foreground shadow-xs"
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted"
+              }`}
+              title="Team Half Pitch view: spacious tactical lineup on own half"
+            >
+              Own Half
+            </button>
+            <button
+              type="button"
+              onClick={() => setPitchView("full")}
+              aria-label="Full Pitch View"
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition min-h-[32px] ${
+                pitchView === "full"
+                  ? "bg-primary text-primary-foreground shadow-xs"
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted"
+              }`}
+              title="Full Match Pitch view: players positioned in defending half"
+            >
+              Full Pitch
+            </button>
+          </div>
+
           {customSlotMap && (
             <button
               onClick={handleResetPositions}
@@ -496,38 +538,95 @@ export function TacticalPitch({
       {/* 2D Grass Football Pitch Board */}
       <div className="football-pitch relative w-full aspect-[4/3] sm:aspect-[16/11] max-h-[560px] flex items-center justify-center shadow-2xl rounded-2xl overflow-hidden border border-emerald-950">
         {/* Pitch Lines (SVG Field Markings) */}
-        <svg
-          className="absolute inset-0 w-full h-full pointer-events-none stroke-white/60 fill-none"
-          strokeWidth="1.8"
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          {/* Outer Boundary */}
-          <rect x="4%" y="4%" width="92%" height="92%" rx="4" />
+        {pitchView === "half" ? (
+          <svg
+            className="absolute inset-0 w-full h-full pointer-events-none stroke-white/70 fill-none"
+            strokeWidth="1.8"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            {/* Outer Boundary of Team's Half */}
+            <rect x="4%" y="4%" width="92%" height="92%" rx="4" />
 
-          {/* Half-Way Line */}
-          <line x1="4%" y1="50%" x2="96%" y2="50%" />
+            {/* Top Line = Halfway Line (thick regulation division line) */}
+            <line x1="4%" y1="4%" x2="96%" y2="4%" strokeWidth="3" />
 
-          {/* Center Circle */}
-          <circle cx="50%" cy="50%" r="14%" />
-          <circle cx="50%" cy="50%" r="1.5%" fill="rgba(255,255,255,0.7)" />
+            {/* Center Circle Arc (curving down from halfway line into team's half) */}
+            <path d="M 34% 4% A 16% 16% 0 0 0 66% 4%" strokeWidth="1.8" />
+            {/* Center Kickoff Spot */}
+            <circle cx="50%" cy="4%" r="1.5%" fill="rgba(255,255,255,0.8)" />
 
-          {/* Top Penalty Box (Opponent Goal) */}
-          <rect x="25%" y="4%" width="50%" height="20%" />
-          <rect x="37%" y="4%" width="26%" height="8%" />
-          <path d="M 40% 24% A 12% 12% 0 0 0 60% 24%" />
+            {/* Defensive Penalty Box (18-yard box) */}
+            <rect x="22%" y="72%" width="56%" height="24%" />
+            {/* Goal Area (6-yard box) */}
+            <rect x="36%" y="86%" width="28%" height="10%" />
+            {/* Penalty Spot */}
+            <circle cx="50%" cy="80%" r="1.5%" fill="rgba(255,255,255,0.8)" />
+            {/* Penalty Arc (D-Box) */}
+            <path d="M 40% 72% A 10% 10% 0 0 1 60% 72%" />
 
-          {/* Bottom Penalty Box (Home Goal) */}
-          <rect x="25%" y="76%" width="50%" height="20%" />
-          <rect x="37%" y="88%" width="26%" height="8%" />
-          <path d="M 40% 76% A 12% 12% 0 0 1 60% 76%" />
-          <circle cx="50%" cy="84%" r="1.2%" fill="rgba(255,255,255,0.7)" />
+            {/* Bottom Goal Line */}
+            <line x1="4%" y1="96%" x2="96%" y2="96%" strokeWidth="3" />
 
-          {/* Corner Arcs */}
-          <path d="M 4% 6% A 2% 2% 0 0 0 6% 4%" />
-          <path d="M 94% 4% A 2% 2% 0 0 0 96% 6%" />
-          <path d="M 4% 94% A 2% 2% 0 0 0 6% 96%" />
-          <path d="M 94% 96% A 2% 2% 0 0 0 96% 94%" />
-        </svg>
+            {/* Visual Goal Frame Behind Goal Line */}
+            <rect x="42%" y="96%" width="16%" height="2%" strokeDasharray="3 3" fill="rgba(255,255,255,0.15)" />
+
+            {/* Corner Arcs (bottom defensive corners) */}
+            <path d="M 4% 92% A 4% 4% 0 0 0 8% 96%" />
+            <path d="M 92% 96% A 4% 4% 0 0 0 96% 92%" />
+          </svg>
+        ) : (
+          <svg
+            className="absolute inset-0 w-full h-full pointer-events-none stroke-white/60 fill-none"
+            strokeWidth="1.8"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            {/* Outer Boundary */}
+            <rect x="4%" y="4%" width="92%" height="92%" rx="4" />
+
+            {/* Half-Way Line */}
+            <line x1="4%" y1="50%" x2="96%" y2="50%" strokeWidth="2" />
+
+            {/* Center Circle */}
+            <circle cx="50%" cy="50%" r="14%" />
+            <circle cx="50%" cy="50%" r="1.5%" fill="rgba(255,255,255,0.7)" />
+
+            {/* Top Penalty Box (Opponent Goal) */}
+            <rect x="25%" y="4%" width="50%" height="20%" />
+            <rect x="37%" y="4%" width="26%" height="8%" />
+            <path d="M 40% 24% A 12% 12% 0 0 0 60% 24%" />
+
+            {/* Bottom Penalty Box (Home Goal) */}
+            <rect x="25%" y="76%" width="50%" height="20%" />
+            <rect x="37%" y="88%" width="26%" height="8%" />
+            <path d="M 40% 76% A 12% 12% 0 0 1 60% 76%" />
+            <circle cx="50%" cy="84%" r="1.2%" fill="rgba(255,255,255,0.7)" />
+
+            {/* Corner Arcs */}
+            <path d="M 4% 6% A 2% 2% 0 0 0 6% 4%" />
+            <path d="M 94% 4% A 2% 2% 0 0 0 96% 6%" />
+            <path d="M 4% 94% A 2% 2% 0 0 0 6% 96%" />
+            <path d="M 94% 96% A 2% 2% 0 0 0 96% 94%" />
+          </svg>
+        )}
+
+        {/* Pitch Orientation Indicators */}
+        {pitchView === "half" ? (
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-950/70 border border-white/20 text-[10px] font-bold text-white/90 shadow-sm pointer-events-none backdrop-blur-xs">
+            <ArrowUp size={12} className="text-emerald-400" />
+            <span>Halfway Line • Attacking Direction</span>
+          </div>
+        ) : (
+          <div className="absolute top-[20%] left-1/2 -translate-x-1/2 flex flex-col items-center gap-1 px-3.5 py-1.5 rounded-xl bg-slate-950/45 border border-white/15 text-white/70 pointer-events-none text-center backdrop-blur-xs">
+            <ArrowUp size={14} className="text-emerald-400 animate-pulse" />
+            <span className="text-[10px] font-black uppercase tracking-wider">Opponent Half</span>
+            <span className="text-[9px] text-white/50">Attacking Direction</span>
+          </div>
+        )}
+
+        {/* Defensive Goal Line Indicator */}
+        <div className="absolute bottom-1.5 left-1/2 -translate-x-1/2 px-2.5 py-0.5 rounded-full bg-slate-950/50 text-[9px] font-mono font-bold text-white/60 pointer-events-none">
+          {pitchView === "half" ? "Defending Goal" : "Own Half (Defending)"}
+        </div>
 
         {/* Player Tokens Placed on Field */}
         {playerCoordinates.map(({ player, x, y, lineSize, lineIndex }) => {

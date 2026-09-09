@@ -16,7 +16,7 @@ export default async function OrganizePage() {
     .where(eq(users.email, user.email))
     .limit(1);
 
-  const effectiveRole = profile?.role || user.role || "fan";
+  const effectiveRole = user.role || profile?.role || "fan";
 
   // Strict RBAC Guard: Only organizers can access the director dashboard
   if (effectiveRole !== "organizer") {

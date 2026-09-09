@@ -126,5 +126,5 @@ export default async function PublicTournamentPage(props: {
     user: signedIn,
   };
 
-  return <TournamentShowcaseClient initialData={initialData} />;
+  return <TournamentShowcaseClient initialData={initialData as any} />;
 }

@@ -78,6 +78,7 @@ type Tournament = {
   startDate: string;
   durationDays: number;
   status: string;
+  teamFormat?: string;
   divisions: Division[];
   registeredTeams: number;
   approvedTeams: number;
@@ -86,12 +87,22 @@ type Tournament = {
   nextFixture?: { kickoffAt: string; pitch: number; status: string };
 };
 
-const dateLabel = (date: string) =>
-  new Date(`${date}T00:00:00`).toLocaleDateString("en-IN", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  });
+const dateLabel = (date?: string | null) => {
+  if (!date || typeof date !== "string") return "TBD";
+  const raw = date.includes("T") ? date.split("T")[0] : date;
+  const parts = raw.split("-");
+  if (parts.length === 3) {
+    const [y, m, d] = parts;
+    const dt = new Date(Number(y), Number(m) - 1, Number(d));
+    if (!isNaN(dt.getTime())) {
+      return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+    }
+  }
+  const parsed = new Date(date);
+  return isNaN(parsed.getTime())
+    ? date || "TBD"
+    : parsed.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+};
 
 const money = (paise: number) =>
   paise
@@ -144,6 +155,7 @@ export default function DiscoverClient({
     state: preferredState || "",
     city: preferredCity || "",
     locality: "",
+    teamFormat: "",
   });
   const [applied, setApplied] = useState(filters);
 
@@ -213,7 +225,7 @@ export default function DiscoverClient({
   };
 
   const clear = () => {
-    const next = { search: "", state: "", city: "", locality: "" };
+    const next = { search: "", state: "", city: "", locality: "", teamFormat: "" };
     setFilters(next);
     setApplied(next);
   };
@@ -362,6 +374,17 @@ export default function DiscoverClient({
             ))}
           </select>
 
+          <select
+            value={filters.teamFormat}
+            onChange={(e) => setFilters({ ...filters, teamFormat: e.target.value })}
+            className="text-xs font-bold bg-muted/60 px-3.5 py-2 rounded-xl border border-border focus:outline-none cursor-pointer text-foreground"
+          >
+            <option value="">All Formats</option>
+            <option value="5v5">⚡ 5v5 Turf / Futsal</option>
+            <option value="7v7">🌱 7v7 Grassroots</option>
+            <option value="11v11">🏆 11v11 Full Pitch</option>
+          </select>
+
           <button
             type="submit"
             className="interactive-button px-4 py-2 rounded-xl bg-primary text-primary-foreground font-bold text-xs shadow-sm hover:opacity-90 transition"
@@ -369,7 +392,7 @@ export default function DiscoverClient({
             Filter Matches
           </button>
 
-          {(applied.search || applied.state || applied.city) && (
+          {(applied.search || applied.state || applied.city || applied.teamFormat) && (
             <button
               type="button"
               onClick={clear}
@@ -456,10 +479,21 @@ export default function DiscoverClient({
                       </h3>
                     </div>
 
-                    {/* Regional Crest Badge */}
+                    {/* Regional Crest & Match Format Badges */}
                     <div className="flex flex-wrap items-center gap-1.5 pt-1">
                       <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md text-[10px] font-bold border ${regBadge.color}`}>
                         {regBadge.text}
+                      </span>
+                      <span
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-black border ${
+                          item.teamFormat === "5v5"
+                            ? "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400 border-cyan-500/30"
+                            : item.teamFormat === "7v7"
+                            ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
+                            : "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30"
+                        }`}
+                      >
+                        {item.teamFormat === "5v5" ? "⚡ 5v5 Turf" : item.teamFormat === "7v7" ? "🌱 7v7 Mini" : "🏆 11v11 Full"}
                       </span>
                       {item.divisions.slice(0, 2).map((div) => (
                         <span key={div.id} className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-muted text-muted-foreground">

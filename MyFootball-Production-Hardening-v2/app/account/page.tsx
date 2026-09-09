@@ -16,7 +16,7 @@ export default async function AccountPage() {
   return (
     <ProfileSetup
       user={user}
-      currentRole={profile?.role}
+      currentRole={user.role || profile?.role}
       preferredState={profile?.preferredState}
       preferredCity={profile?.preferredCity}
       editing

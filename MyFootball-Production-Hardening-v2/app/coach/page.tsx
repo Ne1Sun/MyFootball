@@ -28,7 +28,7 @@ export default async function CoachPage() {
     .where(eq(users.email, user.email))
     .limit(1);
 
-  const effectiveRole = profile?.role || user.role || "fan";
+  const effectiveRole = user.role || profile?.role || "fan";
 
   // Strict RBAC Guard: Only coaches can access the coach tactical portal
   if (effectiveRole !== "coach") {
@@ -90,5 +90,5 @@ export default async function CoachPage() {
     },
   };
 
-  return <CoachPortalClient initialData={initialData} />;
+  return <CoachPortalClient initialData={initialData as any} />;
 }

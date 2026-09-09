@@ -44,7 +44,7 @@ export default async function DiscoverPage() {
   return (
     <DiscoverClient
       user={user}
-      role={profile?.role || "fan"}
+      role={user?.role || profile?.role || "fan"}
       preferredState={profile?.preferredState || ""}
       preferredCity={profile?.preferredCity || ""}
     />

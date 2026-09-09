@@ -40,13 +40,18 @@ import {
 } from "lucide-react";
 import type { ChatGPTUser } from "./chatgpt-auth";
 import ThemeToggle from "./theme-toggle";
-import type { AppData, Division, Entry, Fixture, MatchEvent, Player, SquadMember, Tournament } from "./components/types";
+import type { AppData, Club, Division, Entry, Fixture, MatchEvent, Player, SquadMember, TeamFormat, Tournament } from "./components/types";
 import { SquadManager } from "./components/squads/SquadManager";
 import { LiveMatchConsole } from "./components/matchday/LiveMatchConsole";
 import { KnockoutBracket } from "./components/brackets/KnockoutBracket";
 import { FeeReceiptModal } from "./components/payments/FeeReceiptModal";
 import { LeaderboardsView } from "./components/stats/LeaderboardsView";
 import { StandingsView } from "./components/standings/StandingsView";
+import {
+  getFormatDurationPresets,
+  getRecommendedHalftime,
+  validateMatchDuration,
+} from "./lib/competition";
 
 type View =
   | "Overview"
@@ -68,6 +73,7 @@ const emptyData: AppData = {
   announcements: [],
   players: [],
   squadMembers: [],
+  clubs: [],
 };
 
 const nav: Array<{ label: View; icon: typeof Trophy; badge?: string }> = [
@@ -88,8 +94,22 @@ const money = (paise: number) =>
   new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(
     paise / 100
   );
-const dateLabel = (date: string) =>
-  new Date(`${date}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+const dateLabel = (date?: string | null) => {
+  if (!date || typeof date !== "string") return "TBD";
+  const raw = date.includes("T") ? date.split("T")[0] : date;
+  const parts = raw.split("-");
+  if (parts.length === 3) {
+    const [y, m, d] = parts;
+    const dt = new Date(Number(y), Number(m) - 1, Number(d));
+    if (!isNaN(dt.getTime())) {
+      return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+    }
+  }
+  const parsed = new Date(date);
+  return isNaN(parsed.getTime())
+    ? date || "TBD"
+    : parsed.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+};
 const timeLabel = (date: string) =>
   new Date(date).toLocaleString("en-IN", {
     day: "2-digit",
@@ -150,46 +170,126 @@ function CreateTournament({
   onSaved: (payload: Record<string, unknown>) => Promise<void>;
 }) {
   const [ages, setAges] = useState(["U-17"]);
+  const [teamFormat, setTeamFormat] = useState<TeamFormat>("11v11");
+  const [maxSquadSize, setMaxSquadSize] = useState(18);
+  const [matchDuration, setMatchDuration] = useState<number>(90);
+  const [durationInput, setDurationInput] = useState<string>("90");
+  const [durationError, setDurationError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [coords, setCoords] = useState({ latitude: "", longitude: "" });
 
-  const usePosition = () =>
-    navigator.geolocation?.getCurrentPosition((position) =>
-      setCoords({
-        latitude: position.coords.latitude.toFixed(6),
-        longitude: position.coords.longitude.toFixed(6),
-      })
+  const handleFormatSelect = (format: TeamFormat) => {
+    setTeamFormat(format);
+    if (format === "5v5") {
+      setMaxSquadSize(10);
+      setMatchDuration(40);
+      setDurationInput("40");
+      setDurationError(null);
+    } else if (format === "7v7") {
+      setMaxSquadSize(14);
+      setMatchDuration(50);
+      setDurationInput("50");
+      setDurationError(null);
+    } else {
+      setMaxSquadSize(18);
+      setMatchDuration(90);
+      setDurationInput("90");
+      setDurationError(null);
+    }
+  };
+
+  const handleDurationChange = (raw: string) => {
+    setDurationInput(raw);
+    if (!raw.trim()) {
+      setDurationError("Match duration is required.");
+      return;
+    }
+    const val = validateMatchDuration(raw, matchDuration);
+    if (!val.valid) {
+      setDurationError(val.error || "Invalid match duration.");
+    } else {
+      setDurationError(null);
+      setMatchDuration(val.value);
+    }
+  };
+  const handleSelectPreset = (preset: number) => {
+    setMatchDuration(preset);
+    setDurationInput(String(preset));
+    setDurationError(null);
+  };
+  const [geoStatus, setGeoStatus] = useState<string>("");
+  const [formError, setFormError] = useState<string | null>(null);
+
+  const usePosition = () => {
+    if (!navigator.geolocation) {
+      setGeoStatus("Geolocation is not supported by your browser.");
+      return;
+    }
+    setGeoStatus("Detecting coordinates...");
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setCoords({
+          latitude: position.coords.latitude.toFixed(6),
+          longitude: position.coords.longitude.toFixed(6),
+        });
+        setGeoStatus("Coordinates detected successfully!");
+        setTimeout(() => setGeoStatus(""), 3000);
+      },
+      (error) => {
+        setGeoStatus(error.message || "Location access denied. Centroid will be auto-resolved from city.");
+        setTimeout(() => setGeoStatus(""), 4000);
+      },
+      { timeout: 8000 }
     );
+  };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const val = validateMatchDuration(durationInput, matchDuration);
+    if (!val.valid) {
+      setDurationError(val.error || "Please enter an even natural number.");
+      return;
+    }
     setBusy(true);
-    const form = new FormData(event.currentTarget);
-    await onSaved({
-      action: "createTournament",
-      name: form.get("name"),
-      organizedBy: form.get("organizedBy"),
-      city: form.get("city"),
-      venueName: form.get("venueName"),
-      addressLine1: form.get("addressLine1"),
-      locality: form.get("locality"),
-      state: form.get("state"),
-      postalCode: form.get("postalCode"),
-      latitude: form.get("latitude"),
-      longitude: form.get("longitude"),
-      startDate: form.get("startDate"),
-      durationDays: form.get("durationDays"),
-      contactName: form.get("contactName"),
-      contactPhone: form.get("contactPhone"),
-      format: form.get("format"),
-      maxTeams: form.get("maxTeams"),
-      maxSquadSize: form.get("maxSquadSize"),
-      feeRupees: form.get("feeRupees"),
-      ageGroups: ages,
-      requirePlayers: form.get("requirePlayers") === "on",
-      requireDocuments: form.get("requireDocuments") === "on",
-    });
-    setBusy(false);
+    setFormError(null);
+    try {
+      const form = new FormData(event.currentTarget);
+      const halfTimeBreak = getRecommendedHalftime(val.value);
+      await onSaved({
+        action: "createTournament",
+        name: form.get("name"),
+        teamFormat: form.get("teamFormat") || teamFormat,
+        matchDurationMinutes: val.value,
+        halfTimeBreakMinutes: halfTimeBreak,
+        organizedBy: form.get("organizedBy"),
+        city: form.get("city"),
+        venueName: form.get("venueName"),
+        addressLine1: form.get("addressLine1"),
+        locality: form.get("locality"),
+        state: form.get("state"),
+        postalCode: form.get("postalCode"),
+        latitude: coords.latitude || form.get("latitude"),
+        longitude: coords.longitude || form.get("longitude"),
+        startDate: form.get("startDate"),
+        durationDays: form.get("durationDays"),
+        contactName: form.get("contactName"),
+        contactPhone: form.get("contactPhone"),
+        format: form.get("format"),
+        maxTeams: form.get("maxTeams"),
+        maxSquadSize: form.get("maxSquadSize") || maxSquadSize,
+        feeRupees: form.get("feeRupees"),
+        ageGroups: ages,
+        openRegistration: form.get("openRegistration") === "on",
+        requirePlayers: form.get("requirePlayers") === "on",
+        requireDocuments: form.get("requireDocuments") === "on",
+      });
+      onClose();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to create tournament.";
+      setFormError(msg);
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -197,6 +297,12 @@ function CreateTournament({
       <form onSubmit={submit}>
         <div className="modal-body">
           <div className="form-grid">
+            {formError && (
+              <div className="field field-wide p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-600 dark:text-rose-400 text-xs font-bold flex items-center gap-2">
+                <span>⚠️</span>
+                <span>{formError}</span>
+              </div>
+            )}
             <label className="field field-wide">
               <span>Tournament name</span>
               <input name="name" placeholder="e.g. Mumbai Super Cup 2026" required autoFocus />
@@ -227,31 +333,32 @@ function CreateTournament({
             </label>
             <label className="field">
               <span>PIN code</span>
-              <input name="postalCode" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} placeholder="400001" required />
+              <input name="postalCode" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} placeholder="400001" />
             </label>
             <label className="field">
-              <span>Latitude</span>
+              <span>Latitude (Optional)</span>
               <input
                 name="latitude"
                 value={coords.latitude}
                 onChange={(event) => setCoords({ ...coords, latitude: event.target.value })}
-                placeholder="18.924800"
-                required
+                placeholder="Auto-detected if blank"
               />
             </label>
             <label className="field">
-              <span>Longitude</span>
+              <span>Longitude (Optional)</span>
               <input
                 name="longitude"
                 value={coords.longitude}
                 onChange={(event) => setCoords({ ...coords, longitude: event.target.value })}
-                placeholder="72.828600"
-                required
+                placeholder="Auto-detected if blank"
               />
             </label>
-            <button className="location-helper field-wide" type="button" onClick={usePosition}>
-              <MapPin size={15} /> Use my current coordinates
-            </button>
+            <div className="field-wide flex items-center justify-between gap-2">
+              <button className="location-helper flex-1" type="button" onClick={usePosition}>
+                <MapPin size={15} /> Use my current coordinates
+              </button>
+              {geoStatus && <span className="text-[11px] text-muted-foreground">{geoStatus}</span>}
+            </div>
             <label className="field">
               <span>Start date</span>
               <input name="startDate" type="date" required />
@@ -275,8 +382,155 @@ function CreateTournament({
               <span>Contact phone</span>
               <input name="contactPhone" type="tel" placeholder="+91..." required />
             </label>
+            {/* Match Playing Format (5v5 / 7v7 / 11v11) */}
+            <div className="field field-wide space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-foreground">Match Playing Format *</span>
+                <span className="text-[11px] font-medium text-muted-foreground">Select team size on pitch</span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                {[
+                  {
+                    id: "5v5",
+                    icon: "⚡",
+                    title: "5v5 Turf / Futsal",
+                    desc: "5 Starters (1 GK + 4 Outfield) • 30–40m match",
+                    badge: "Turf / Box",
+                  },
+                  {
+                    id: "7v7",
+                    icon: "🌱",
+                    title: "7v7 Grassroots",
+                    desc: "7 Starters (1 GK + 6 Outfield) • 50m match",
+                    badge: "Mini Pitch",
+                  },
+                  {
+                    id: "11v11",
+                    icon: "🏆",
+                    title: "11v11 Full Pitch",
+                    desc: "11 Starters (1 GK + 10 Outfield) • 90m match",
+                    badge: "Standard",
+                  },
+                ].map((f) => {
+                  const active = teamFormat === f.id;
+                  return (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => handleFormatSelect(f.id as TeamFormat)}
+                      className={`p-3 rounded-2xl border text-left transition flex flex-col justify-between space-y-1.5 ${
+                        active
+                          ? "bg-amber-500/15 border-amber-500 shadow-sm text-foreground ring-1 ring-amber-500/50"
+                          : "bg-muted/40 border-border hover:border-border/80 text-muted-foreground"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between w-full">
+                        <span className="text-base">{f.icon}</span>
+                        <span
+                          className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md border ${
+                            active
+                              ? "bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30"
+                              : "bg-muted text-muted-foreground border-border"
+                          }`}
+                        >
+                          {f.badge}
+                        </span>
+                      </div>
+                      <div>
+                        <strong className="text-xs font-bold block text-foreground">{f.title}</strong>
+                        <span className="text-[11px] leading-tight block text-muted-foreground">{f.desc}</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+              <input type="hidden" name="teamFormat" value={teamFormat} />
+            </div>
+
+            {/* Custom Match Duration (Divisible cleanly by 2 in natural numbers) */}
+            <div className="field field-wide space-y-2 p-3.5 rounded-2xl border border-border/80 bg-muted/20">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
+                <div className="flex items-center gap-1.5">
+                  <Clock3 size={15} className="text-amber-500" />
+                  <span className="text-xs font-bold text-foreground">Custom Match Duration (Minutes) *</span>
+                </div>
+                <span className="text-[11px] font-medium text-muted-foreground">
+                  Must be divisible cleanly by 2 (natural numbers)
+                </span>
+              </div>
+
+              {/* Quick Presets for this format */}
+              <div className="space-y-1.5">
+                <span className="text-[11px] text-muted-foreground font-semibold">Recommended presets for {teamFormat}:</span>
+                <div className="flex flex-wrap gap-2">
+                  {getFormatDurationPresets(teamFormat).map((preset) => {
+                    const active = Number(durationInput) === preset && !durationError;
+                    return (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => handleSelectPreset(preset)}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition ${
+                          active
+                            ? "bg-amber-500 text-black border-amber-500 shadow-sm"
+                            : "bg-background hover:bg-muted text-foreground border-border"
+                        }`}
+                      >
+                        {preset} mins <span className={`text-[10px] font-normal ${active ? "text-black/80" : "text-muted-foreground"}`}>({preset / 2}m + {preset / 2}m)</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Custom number input with step 2 */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                <div>
+                  <label className="text-[11px] font-semibold text-muted-foreground block mb-1">
+                    Enter custom match time (Minutes):
+                  </label>
+                  <div className="relative">
+                    <input
+                      name="matchDurationMinutes"
+                      type="number"
+                      step="2"
+                      min="10"
+                      max="180"
+                      value={durationInput}
+                      onChange={(e) => handleDurationChange(e.target.value)}
+                      placeholder="e.g. 30, 40, 60, 90"
+                      className={`w-full px-3 py-2 text-sm rounded-xl border bg-background text-foreground font-semibold ${
+                        durationError ? "border-rose-500 ring-1 ring-rose-500/50" : "border-border"
+                      }`}
+                      required
+                    />
+                    <span className="absolute right-3 top-2.5 text-xs text-muted-foreground font-medium">mins</span>
+                  </div>
+                </div>
+
+                <div className="flex flex-col justify-center">
+                  {!durationError ? (
+                    <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-600 dark:text-emerald-400 text-xs flex flex-col gap-0.5">
+                      <div className="flex items-center gap-1.5 font-bold">
+                        <Check size={13} />
+                        <span>2 equal halves of {matchDuration / 2} minutes each</span>
+                      </div>
+                      <span className="text-[11px] text-muted-foreground">
+                        Halftime break: {getRecommendedHalftime(matchDuration)} mins • Extra time supported
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-600 dark:text-rose-400 text-xs flex items-start gap-1.5">
+                      <span className="text-sm leading-none mt-0.5">⚠️</span>
+                      <span className="leading-tight text-[11px] font-medium">{durationError}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
             <label className="field">
-              <span>Tournament Format</span>
+              <span>Competition Bracket Structure</span>
               <select name="format" defaultValue="group_knockout">
                 <option value="group_knockout">Group Stage + Knockout Bracket</option>
                 <option value="round_robin">Round Robin League</option>
@@ -295,7 +549,21 @@ function CreateTournament({
             </label>
             <label className="field">
               <span>Maximum squad size</span>
-              <input name="maxSquadSize" type="number" min="5" max="50" defaultValue="18" />
+              <input
+                name="maxSquadSize"
+                type="number"
+                min="5"
+                max="50"
+                value={maxSquadSize}
+                onChange={(e) => setMaxSquadSize(Number(e.target.value))}
+              />
+              <small className="text-[11px] text-muted-foreground mt-0.5 block">
+                {teamFormat === "5v5"
+                  ? "Recommended: 8–12 players (5 starters)"
+                  : teamFormat === "7v7"
+                  ? "Recommended: 10–14 players (7 starters)"
+                  : "Recommended: 16–25 players (11 starters)"}
+              </small>
             </label>
             <label className="field">
               <span>Fee per team (₹)</span>
@@ -328,6 +596,13 @@ function CreateTournament({
               </div>
               <input name="requirePlayers" type="checkbox" defaultChecked />
             </label>
+            <label className="toggle-row field-wide">
+              <div>
+                <strong>Open public team registration</strong>
+                <small>Publish competition immediately on Discover and allow clubs to register</small>
+              </div>
+              <input name="openRegistration" type="checkbox" defaultChecked />
+            </label>
           </div>
         </div>
         <div className="modal-actions">
@@ -345,14 +620,45 @@ function CreateTournament({
 
 function AddTeamModal({
   divisions,
+  clubs,
   onClose,
   onSaved,
 }: {
   divisions: Division[];
+  clubs?: Club[];
   onClose: () => void;
   onSaved: (payload: Record<string, unknown>) => Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
+  const [clubName, setClubName] = useState("");
+  const [teamName, setTeamName] = useState("");
+  const [organizationType, setOrganizationType] = useState("academy");
+  const [city, setCity] = useState("Mumbai");
+  const [contactName, setContactName] = useState("");
+  const [contactPhone, setContactPhone] = useState("");
+
+  const handleSelectClub = (clubId: string) => {
+    if (!clubId) {
+      setClubName("");
+      setOrganizationType("academy");
+      setCity("Mumbai");
+      setContactName("");
+      setContactPhone("");
+      return;
+    }
+    const c = clubs?.find((item) => item.id === clubId);
+    if (c) {
+      setClubName(c.name);
+      setOrganizationType(c.organizationType || "academy");
+      setCity(c.city || "Mumbai");
+      setContactName(c.contactName || "");
+      setContactPhone(c.contactPhone || "");
+      if (!teamName) {
+        setTeamName(`${c.name} U-17`);
+      }
+    }
+  };
+
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setBusy(true);
@@ -360,12 +666,12 @@ function AddTeamModal({
     await onSaved({
       action: "addTeam",
       divisionId: form.get("divisionId"),
-      clubName: form.get("clubName"),
-      teamName: form.get("teamName"),
-      organizationType: form.get("organizationType"),
-      city: form.get("city"),
-      contactName: form.get("contactName"),
-      contactPhone: form.get("contactPhone"),
+      clubName: clubName || form.get("clubName"),
+      teamName: teamName || form.get("teamName"),
+      organizationType: organizationType || form.get("organizationType"),
+      city: city || form.get("city"),
+      contactName: contactName || form.get("contactName"),
+      contactPhone: contactPhone || form.get("contactPhone"),
       paymentStatus: form.get("paymentStatus"),
       groupName: form.get("groupName"),
       approved: form.get("approved") === "on",
@@ -387,17 +693,48 @@ function AddTeamModal({
                 ))}
               </select>
             </label>
+
+            {clubs && clubs.length > 0 && (
+              <label className="field field-wide">
+                <span>Quick-Select Registered Organization / Club</span>
+                <select onChange={(e) => handleSelectClub(e.target.value)} defaultValue="">
+                  <option value="">-- Choose from registered Indian academies / clubs --</option>
+                  {clubs.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} ({c.city}) [{c.organizationType.toUpperCase()}]
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+
             <label className="field">
               <span>Club / Academy Name</span>
-              <input name="clubName" placeholder="Reliance Foundation Young Champs" required />
+              <input
+                name="clubName"
+                value={clubName}
+                onChange={(e) => setClubName(e.target.value)}
+                placeholder="Reliance Foundation Young Champs"
+                required
+              />
             </label>
             <label className="field">
               <span>Team Name</span>
-              <input name="teamName" placeholder="RFYC U17" required />
+              <input
+                name="teamName"
+                value={teamName}
+                onChange={(e) => setTeamName(e.target.value)}
+                placeholder="RFYC U17"
+                required
+              />
             </label>
             <label className="field">
               <span>Organization Type</span>
-              <select name="organizationType">
+              <select
+                name="organizationType"
+                value={organizationType}
+                onChange={(e) => setOrganizationType(e.target.value)}
+              >
                 <option value="academy">Academy</option>
                 <option value="club">Club</option>
                 <option value="school">School</option>
@@ -415,15 +752,31 @@ function AddTeamModal({
             </label>
             <label className="field">
               <span>City</span>
-              <input name="city" placeholder="Mumbai" />
+              <input
+                name="city"
+                value={city}
+                onChange={(e) => setCity(e.target.value)}
+                placeholder="Mumbai"
+              />
             </label>
             <label className="field">
               <span>Contact Person</span>
-              <input name="contactName" required />
+              <input
+                name="contactName"
+                value={contactName}
+                onChange={(e) => setContactName(e.target.value)}
+                required
+              />
             </label>
             <label className="field">
               <span>Mobile Number</span>
-              <input name="contactPhone" type="tel" required />
+              <input
+                name="contactPhone"
+                type="tel"
+                value={contactPhone}
+                onChange={(e) => setContactPhone(e.target.value)}
+                required
+              />
             </label>
             <label className="field">
               <span>Payment Status</span>
@@ -585,32 +938,40 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
   const refreshData = useCallback(async () => {
     try {
       setLoading(true);
+      setError("");
       const res = await fetch("/api/app");
-      if (!res.ok) throw new Error("Failed to load tournament data");
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => null);
+        throw new Error(errJson?.error || "Failed to load tournament data");
+      }
       const json = await res.json();
       setData(json);
-      if (json.tournaments?.length && !selectedId) {
-        setSelectedId(json.tournaments[0].id);
+      if (json.tournaments?.length) {
+        setSelectedId((prev) => (json.tournaments.some((t: Tournament) => t.id === prev) ? prev : json.tournaments[0].id));
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
       setLoading(false);
     }
-  }, [selectedId]);
+  }, []);
 
   useEffect(() => {
     let mounted = true;
     const load = async () => {
       try {
         setLoading(true);
+        setError("");
         const res = await fetch("/api/app");
-        if (!res.ok) throw new Error("Failed to load tournament data");
+        if (!res.ok) {
+          const errJson = await res.json().catch(() => null);
+          throw new Error(errJson?.error || "Failed to load tournament data");
+        }
         const json = await res.json();
         if (mounted) {
           setData(json);
-          if (json.tournaments?.length && !selectedId) {
-            setSelectedId(json.tournaments[0].id);
+          if (json.tournaments?.length) {
+            setSelectedId((prev) => prev || json.tournaments[0].id);
           }
         }
       } catch (err: unknown) {
@@ -627,7 +988,7 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
     return () => {
       mounted = false;
     };
-  }, [selectedId]);
+  }, []);
 
   const handleSaveAction = async (payload: Record<string, unknown>) => {
     try {
@@ -646,6 +1007,7 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
       const msg = err instanceof Error ? err.message : "Error performing action";
       setError(msg);
       setTimeout(() => setError(""), 6000);
+      throw err;
     } finally {
       setBusy(false);
     }
@@ -686,9 +1048,12 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
             onChange={(e) => setSelectedId(e.target.value)}
             className="w-full text-xs font-bold bg-muted/60 p-2.5 rounded-xl border border-border focus:outline-none cursor-pointer"
           >
+            {data.tournaments.length === 0 && (
+              <option value="">No Competitions Found</option>
+            )}
             {data.tournaments.map((t) => (
               <option key={t.id} value={t.id}>
-                {t.name} ({t.city})
+                {t.name} [{t.teamFormat || "11v11"}] ({t.city})
               </option>
             ))}
           </select>
@@ -778,8 +1143,19 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
             </button>
             <div>
               <span className="text-xs uppercase tracking-wider text-muted-foreground font-semibold">Organizer Hub</span>
-              <h1 className="text-lg font-extrabold text-foreground flex items-center gap-2">
-                {activeTournament?.name || "MyFootball India"}
+              <h1 className="text-lg font-extrabold text-foreground flex items-center gap-2 flex-wrap">
+                <span>{activeTournament?.name || "MyFootball India"}</span>
+                {activeTournament && (
+                  <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full border ${
+                    activeTournament.teamFormat === "5v5"
+                      ? "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400 border-cyan-500/30"
+                      : activeTournament.teamFormat === "7v7"
+                      ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
+                      : "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30"
+                  }`}>
+                    {activeTournament.teamFormat === "5v5" ? "⚡ 5v5 Turf" : activeTournament.teamFormat === "7v7" ? "🌱 7v7 Grassroots" : "🏆 11v11 Full"}
+                  </span>
+                )}
               </h1>
             </div>
           </div>
@@ -833,7 +1209,16 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
         {/* Error Banner */}
         {error && (
           <div className="mx-4 lg:mx-8 mt-4 p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-600 dark:text-rose-400 text-xs font-semibold flex items-center justify-between">
-            <span>{error}</span>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span>{error}</span>
+              <button
+                type="button"
+                onClick={refreshData}
+                className="underline hover:opacity-80 font-bold ml-1 cursor-pointer"
+              >
+                Retry
+              </button>
+            </div>
             <button onClick={() => setError("")} className="p-1 hover:bg-rose-500/20 rounded">
               <X size={14} />
             </button>
@@ -844,147 +1229,177 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
         <div className="flex-1 p-4 lg:p-8 space-y-6 max-w-7xl w-full mx-auto">
           {/* TAB 1: OVERVIEW */}
           {view === "Overview" && (
-            <div className="space-y-6">
-              {/* Active Tournament Hero Banner */}
-              <div className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-emerald-950 via-slate-900 to-slate-950 text-white p-6 sm:p-8 border border-emerald-500/20 shadow-xl">
-                <div className="relative z-10 space-y-4 max-w-2xl">
-                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-400 text-xs font-bold border border-emerald-500/30">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                    LIVE COMPETITION HUB
-                  </div>
-                  <h2 className="text-2xl sm:text-4xl font-black tracking-tight">{activeTournament?.name}</h2>
-                  <p className="text-slate-300 text-sm sm:text-base">
-                    {activeTournament?.venueName}, {activeTournament?.locality}, {activeTournament?.city} • {activeTournament?.durationDays} Days Event
+            !activeTournament ? (
+              <div className="p-8 rounded-3xl bg-card border border-border text-center space-y-4 shadow-sm max-w-xl mx-auto my-12">
+                <div className="w-14 h-14 rounded-2xl bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 flex items-center justify-center font-bold mx-auto">
+                  <Trophy size={28} />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-lg font-black text-foreground">No Competition Selected</h3>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    Select a tournament from the sidebar, or create a brand-new competition to inspect matchdays, schedules, brackets, and standings.
                   </p>
-                  <div className="flex flex-wrap gap-3 pt-2">
-                    <button
-                      onClick={() => setView("Matchday")}
-                      className="button primary inline-flex items-center gap-2 text-sm px-4 py-2.5"
-                    >
-                      <Swords size={16} /> Open Live Matchday Console
-                    </button>
-                    <button
-                      onClick={() => setView("Brackets")}
-                      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 font-bold text-sm text-white border border-slate-700 transition"
-                    >
-                      <Trophy size={16} className="text-amber-400" /> View Elimination Bracket
-                    </button>
-                  </div>
+                </div>
+                <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setCreateOpen(true)}
+                    className="button primary inline-flex items-center gap-2 text-xs px-4 py-2.5"
+                  >
+                    <Plus size={15} /> Create Tournament
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setView("Tournaments")}
+                    className="button secondary inline-flex items-center gap-2 text-xs px-4 py-2.5"
+                  >
+                    <Trophy size={15} className="text-primary" /> View Tournaments Tab
+                  </button>
                 </div>
               </div>
-
-              {/* KPI Stat Cards */}
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                <div className="panel-card p-5 rounded-2xl bg-card border border-border space-y-2">
-                  <div className="flex items-center justify-between text-muted-foreground">
-                    <span className="text-xs uppercase font-bold tracking-wider">Divisions</span>
-                    <Trophy size={18} className="text-primary" />
+            ) : (
+              <div className="space-y-6">
+                {/* Active Tournament Hero Banner */}
+                <div className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-emerald-950 via-slate-900 to-slate-950 text-white p-6 sm:p-8 border border-emerald-500/20 shadow-xl">
+                  <div className="relative z-10 space-y-4 max-w-2xl">
+                    <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-400 text-xs font-bold border border-emerald-500/30">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                      LIVE COMPETITION HUB
+                    </div>
+                    <h2 className="text-2xl sm:text-4xl font-black tracking-tight">{activeTournament.name}</h2>
+                    <p className="text-slate-300 text-sm sm:text-base">
+                      {activeTournament.venueName}, {activeTournament.locality}, {activeTournament.city} • {activeTournament.durationDays} Days Event
+                    </p>
+                    <div className="flex flex-wrap gap-3 pt-2">
+                      <button
+                        onClick={() => setView("Matchday")}
+                        className="button primary inline-flex items-center gap-2 text-sm px-4 py-2.5"
+                      >
+                        <Swords size={16} /> Open Live Matchday Console
+                      </button>
+                      <button
+                        onClick={() => setView("Brackets")}
+                        className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 font-bold text-sm text-white border border-slate-700 transition"
+                      >
+                        <Trophy size={16} className="text-amber-400" /> View Elimination Bracket
+                      </button>
+                    </div>
                   </div>
-                  <div className="font-mono font-black text-3xl text-foreground">{activeDivisions.length}</div>
-                  <span className="text-xs text-muted-foreground">Age categories configured</span>
                 </div>
 
-                <div className="panel-card p-5 rounded-2xl bg-card border border-border space-y-2">
-                  <div className="flex items-center justify-between text-muted-foreground">
-                    <span className="text-xs uppercase font-bold tracking-wider">Registered Teams</span>
-                    <ShieldCheck size={18} className="text-emerald-500" />
+                {/* KPI Stat Cards */}
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className="panel-card p-5 rounded-2xl bg-card border border-border space-y-2">
+                    <div className="flex items-center justify-between text-muted-foreground">
+                      <span className="text-xs uppercase font-bold tracking-wider">Divisions</span>
+                      <Trophy size={18} className="text-primary" />
+                    </div>
+                    <div className="font-mono font-black text-3xl text-foreground">{activeDivisions.length}</div>
+                    <span className="text-xs text-muted-foreground">Age categories configured</span>
                   </div>
-                  <div className="font-mono font-black text-3xl text-foreground">{activeEntries.length}</div>
-                  <span className="text-xs text-muted-foreground">Clubs & academies</span>
+
+                  <div className="panel-card p-5 rounded-2xl bg-card border border-border space-y-2">
+                    <div className="flex items-center justify-between text-muted-foreground">
+                      <span className="text-xs uppercase font-bold tracking-wider">Registered Teams</span>
+                      <ShieldCheck size={18} className="text-emerald-500" />
+                    </div>
+                    <div className="font-mono font-black text-3xl text-foreground">{activeEntries.length}</div>
+                    <span className="text-xs text-muted-foreground">Clubs & academies</span>
+                  </div>
+
+                  <div className="panel-card p-5 rounded-2xl bg-card border border-border space-y-2">
+                    <div className="flex items-center justify-between text-muted-foreground">
+                      <span className="text-xs uppercase font-bold tracking-wider">Player Rosters</span>
+                      <Users size={18} className="text-blue-500" />
+                    </div>
+                    <div className="font-mono font-black text-3xl text-foreground">{data.players.length}</div>
+                    <span className="text-xs text-muted-foreground">Players registered in pool</span>
+                  </div>
+
+                  <div className="panel-card p-5 rounded-2xl bg-card border border-border space-y-2">
+                    <div className="flex items-center justify-between text-muted-foreground">
+                      <span className="text-xs uppercase font-bold tracking-wider">Match Events</span>
+                      <TrendingUp size={18} className="text-amber-500" />
+                    </div>
+                    <div className="font-mono font-black text-3xl text-foreground">{activeEvents.length}</div>
+                    <span className="text-xs text-muted-foreground">Goals, cards & subs recorded</span>
+                  </div>
                 </div>
 
-                <div className="panel-card p-5 rounded-2xl bg-card border border-border space-y-2">
-                  <div className="flex items-center justify-between text-muted-foreground">
-                    <span className="text-xs uppercase font-bold tracking-wider">Player Rosters</span>
-                    <Users size={18} className="text-blue-500" />
-                  </div>
-                  <div className="font-mono font-black text-3xl text-foreground">{data.players.length}</div>
-                  <span className="text-xs text-muted-foreground">Players registered in pool</span>
-                </div>
-
-                <div className="panel-card p-5 rounded-2xl bg-card border border-border space-y-2">
-                  <div className="flex items-center justify-between text-muted-foreground">
-                    <span className="text-xs uppercase font-bold tracking-wider">Match Events</span>
-                    <TrendingUp size={18} className="text-amber-500" />
-                  </div>
-                  <div className="font-mono font-black text-3xl text-foreground">{activeEvents.length}</div>
-                  <span className="text-xs text-muted-foreground">Goals, cards & subs recorded</span>
-                </div>
-              </div>
-
-              {/* Quick Jump Modules */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Recent Fixtures / Live Matches */}
-                <div className="panel-card p-6 rounded-2xl bg-card border border-border space-y-4">
-                  <div className="flex items-center justify-between pb-3 border-b border-border">
-                    <h3 className="font-bold text-base text-foreground flex items-center gap-2">
-                      <Swords size={18} className="text-primary" /> Key Match Highlights
-                    </h3>
-                    <button onClick={() => setView("Brackets")} className="text-xs text-primary font-bold hover:underline">
-                      View All
-                    </button>
-                  </div>
-                  <div className="space-y-3">
-                    {activeFixtures.slice(0, 4).map((f) => {
-                      const h = activeEntries.find((e) => e.id === f.homeEntryId);
-                      const a = activeEntries.find((e) => e.id === f.awayEntryId);
-                      return (
-                        <div
-                          key={f.id}
-                          className="flex items-center justify-between p-3 rounded-xl bg-muted/40 hover:bg-muted/70 transition border border-border"
-                        >
-                          <div className="space-y-1">
-                            <span className="text-[10px] uppercase font-bold text-muted-foreground">{f.roundName}</span>
-                            <div className="font-bold text-sm text-foreground">
-                              {h?.teamName || "TBD"} vs {a?.teamName || "TBD"}
+                {/* Quick Jump Modules */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {/* Recent Fixtures / Live Matches */}
+                  <div className="panel-card p-6 rounded-2xl bg-card border border-border space-y-4">
+                    <div className="flex items-center justify-between pb-3 border-b border-border">
+                      <h3 className="font-bold text-base text-foreground flex items-center gap-2">
+                        <Swords size={18} className="text-primary" /> Key Match Highlights
+                      </h3>
+                      <button onClick={() => setView("Brackets")} className="text-xs text-primary font-bold hover:underline">
+                        View All
+                      </button>
+                    </div>
+                    <div className="space-y-3">
+                      {activeFixtures.slice(0, 4).map((f) => {
+                        const h = activeEntries.find((e) => e.id === f.homeEntryId);
+                        const a = activeEntries.find((e) => e.id === f.awayEntryId);
+                        return (
+                          <div
+                            key={f.id}
+                            className="flex items-center justify-between p-3 rounded-xl bg-muted/40 hover:bg-muted/70 transition border border-border"
+                          >
+                            <div className="space-y-1">
+                              <span className="text-[10px] uppercase font-bold text-muted-foreground">{f.roundName}</span>
+                              <div className="font-bold text-sm text-foreground">
+                                {h?.teamName || "TBD"} vs {a?.teamName || "TBD"}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-3">
+                              <span className="font-mono font-black text-base text-foreground">
+                                {f.status === "completed" || f.status === "in_progress"
+                                  ? `${f.homeScore} - ${f.awayScore}`
+                                  : "vs"}
+                              </span>
+                              <button
+                                onClick={() => handleOpenMatchday(f.id)}
+                                className="text-xs px-2.5 py-1 rounded-lg bg-primary/10 text-primary font-bold hover:bg-primary/20 transition"
+                              >
+                                Console
+                              </button>
                             </div>
                           </div>
-                          <div className="flex items-center gap-3">
-                            <span className="font-mono font-black text-base text-foreground">
-                              {f.status === "completed" || f.status === "in_progress"
-                                ? `${f.homeScore} - ${f.awayScore}`
-                                : "vs"}
-                            </span>
-                            <button
-                              onClick={() => handleOpenMatchday(f.id)}
-                              className="text-xs px-2.5 py-1 rounded-lg bg-primary/10 text-primary font-bold hover:bg-primary/20 transition"
-                            >
-                              Console
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
+                        );
+                      })}
+                    </div>
                   </div>
-                </div>
 
-                {/* Tournament Standings Snapshot */}
-                <div className="panel-card p-6 rounded-2xl bg-card border border-border space-y-4">
-                  <div className="flex items-center justify-between pb-3 border-b border-border">
-                    <h3 className="font-bold text-base text-foreground flex items-center gap-2">
-                      <BarChart3 size={18} className="text-primary" /> Standings Preview
-                    </h3>
-                    <button onClick={() => setView("Standings")} className="text-xs text-primary font-bold hover:underline">
-                      Full Tables
-                    </button>
-                  </div>
-                  <div className="space-y-2">
-                    {activeEntries.slice(0, 5).map((entry, i) => (
-                      <div key={entry.id} className="flex items-center justify-between p-2.5 rounded-xl bg-muted/30">
-                        <div className="flex items-center gap-3">
-                          <span className="font-mono font-bold text-xs text-muted-foreground w-4">{i + 1}</span>
-                          <strong className="text-sm text-foreground">{entry.teamName}</strong>
-                          <span className="text-xs text-muted-foreground">({entry.groupName})</span>
+                  {/* Tournament Standings Snapshot */}
+                  <div className="panel-card p-6 rounded-2xl bg-card border border-border space-y-4">
+                    <div className="flex items-center justify-between pb-3 border-b border-border">
+                      <h3 className="font-bold text-base text-foreground flex items-center gap-2">
+                        <BarChart3 size={18} className="text-primary" /> Standings Preview
+                      </h3>
+                      <button onClick={() => setView("Standings")} className="text-xs text-primary font-bold hover:underline">
+                        Full Tables
+                      </button>
+                    </div>
+                    <div className="space-y-2">
+                      {activeEntries.slice(0, 5).map((entry, i) => (
+                        <div key={entry.id} className="flex items-center justify-between p-2.5 rounded-xl bg-muted/30">
+                          <div className="flex items-center gap-3">
+                            <span className="font-mono font-bold text-xs text-muted-foreground w-4">{i + 1}</span>
+                            <strong className="text-sm text-foreground">{entry.teamName}</strong>
+                            <span className="text-xs text-muted-foreground">({entry.groupName})</span>
+                          </div>
+                          <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                            {entry.status.toUpperCase()}
+                          </span>
                         </div>
-                        <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
-                          {entry.status.toUpperCase()}
-                        </span>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
+            )
           )}
 
           {/* TAB 2: TOURNAMENTS */}
@@ -992,65 +1407,179 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
             <div className="space-y-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-xl font-extrabold text-foreground">Your Tournaments</h2>
-                  <p className="text-xs text-muted-foreground">Manage tournament information and exact venue locations.</p>
+                  <h2 className="text-xl font-extrabold text-foreground">Your Tournaments & Organizations</h2>
+                  <p className="text-xs text-muted-foreground">Manage tournament operations, playing formats, and host organizations.</p>
                 </div>
                 <button onClick={() => setCreateOpen(true)} className="button primary inline-flex items-center gap-2 text-sm">
                   <Plus size={16} /> Create Tournament
                 </button>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {data.tournaments.map((t) => (
-                  <div key={t.id} className="panel-card p-6 rounded-2xl bg-card border border-border space-y-4 shadow-sm">
-                    <div className="flex items-center justify-between">
-                      <span className="px-2.5 py-1 rounded-full bg-primary/10 text-primary font-bold text-xs">
-                        {t.status.replace("_", " ").toUpperCase()}
-                      </span>
-                      <span className="text-xs text-muted-foreground">Starts {dateLabel(t.startDate)}</span>
-                    </div>
-
-                    <div>
-                      <h3 className="font-black text-xl text-foreground">{t.name}</h3>
-                      <p className="text-xs text-muted-foreground mt-1">Organized by {t.organizedBy}</p>
-                    </div>
-
-                    <div className="p-3 rounded-xl bg-muted/40 text-xs space-y-1.5 border border-border">
-                      <div className="flex items-center gap-2 text-foreground font-semibold">
-                        <MapPin size={14} className="text-primary" /> {t.venueName}
-                      </div>
-                      <div className="text-muted-foreground">
-                        {t.addressLine1}, {t.locality}, {t.city}, {t.state} - {t.postalCode}
-                      </div>
-                      <div className="text-[11px] font-mono text-muted-foreground">
-                        GPS: {t.latitude}, {t.longitude}
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between pt-2">
-                      <button
-                        onClick={() => {
-                          setSelectedId(t.id);
-                          setView("Overview");
-                        }}
-                        className="button secondary text-xs px-3 py-1.5"
-                      >
-                        Select Competition
-                      </button>
-                      <button
-                        onClick={() => {
-                          if (confirm(`Delete tournament "${t.name}"?`)) {
-                            handleSaveAction({ action: "deleteTournament", tournamentId: t.id });
-                          }
-                        }}
-                        className="p-2 text-muted-foreground hover:text-rose-500 transition"
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </div>
+              {data.tournaments.length === 0 ? (
+                <div className="p-8 rounded-3xl bg-card border border-border text-center space-y-4 shadow-sm max-w-xl mx-auto my-8">
+                  <div className="w-14 h-14 rounded-2xl bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 flex items-center justify-center font-bold mx-auto">
+                    <Trophy size={28} />
                   </div>
-                ))}
-              </div>
+                  <div className="space-y-1">
+                    <h3 className="text-lg font-black text-foreground">No Competitions Created Yet</h3>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      You haven&apos;t hosted any tournaments under this organizer identity. Create a brand-new grassroots tournament or load official demonstration tournaments.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setCreateOpen(true)}
+                      className="button primary inline-flex items-center gap-2 text-xs px-4 py-2.5"
+                    >
+                      <Plus size={15} /> Create Tournament
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await handleSaveAction({ action: "seedDemoTournaments" });
+                        await refreshData();
+                      }}
+                      className="button secondary inline-flex items-center gap-2 text-xs px-4 py-2.5"
+                    >
+                      <Sparkles size={15} className="text-amber-400" /> Load Demo Competitions
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {data.tournaments.map((t) => {
+                    const isSelected = (activeTournament?.id === t.id);
+                    const tDivisions = data.divisions.filter((d) => d.tournamentId === t.id);
+                    const tDivIds = new Set(tDivisions.map((d) => d.id));
+                    const tEntries = data.entries.filter((e) => tDivIds.has(e.divisionId));
+                    return (
+                      <div
+                        key={t.id}
+                        className={`panel-card p-6 rounded-2xl bg-card border transition space-y-4 shadow-sm ${
+                          isSelected
+                            ? "border-primary ring-2 ring-primary/30 shadow-md bg-gradient-to-b from-primary/5 to-transparent"
+                            : "border-border hover:border-border/80"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="flex items-center gap-2">
+                            <span className="px-2.5 py-1 rounded-full bg-primary/10 text-primary font-bold text-xs">
+                              {(t.status || "DRAFT").replace("_", " ").toUpperCase()}
+                            </span>
+                            <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full border ${
+                              t.teamFormat === "5v5"
+                                ? "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400 border-cyan-500/30"
+                                : t.teamFormat === "7v7"
+                                ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
+                                : "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30"
+                            }`}>
+                              {t.teamFormat === "5v5" ? "⚡ 5v5 Turf" : t.teamFormat === "7v7" ? "🌱 7v7 Grassroots" : "🏆 11v11 Full"}
+                            </span>
+                          </div>
+                          {isSelected ? (
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 text-[10px] font-extrabold uppercase">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> ACTIVE COMPETITION
+                            </span>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">Starts {dateLabel(t.startDate)}</span>
+                          )}
+                        </div>
+
+                        <div>
+                          <h3 className="font-black text-xl text-foreground">{t.name}</h3>
+                          <p className="text-xs text-muted-foreground mt-1">
+                            Organized by <strong className="text-foreground">{t.organizedBy || "Grassroots Federation"}</strong>
+                          </p>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2 text-[11px] font-semibold text-muted-foreground">
+                          <span className="px-2 py-1 rounded-lg bg-muted/60 border border-border">
+                            🏆 {tDivisions.length} {tDivisions.length === 1 ? "Division" : "Divisions"}
+                          </span>
+                          <span className="px-2 py-1 rounded-lg bg-muted/60 border border-border">
+                            🛡️ {tEntries.length} {tEntries.length === 1 ? "Team Registered" : "Teams Registered"}
+                          </span>
+                          <span className="px-2 py-1 rounded-lg bg-muted/60 border border-border">
+                            ⏱️ {t.matchDurationMinutes || 90} Mins
+                          </span>
+                        </div>
+
+                        <div className="p-3 rounded-xl bg-muted/40 text-xs space-y-1.5 border border-border">
+                          <div className="flex items-center gap-2 text-foreground font-semibold">
+                            <MapPin size={14} className="text-primary" /> {t.venueName}
+                          </div>
+                          <div className="text-muted-foreground">
+                            {t.addressLine1}, {t.locality}, {t.city}, {t.state} - {t.postalCode}
+                          </div>
+                          <div className="text-[11px] font-mono text-muted-foreground">
+                            GPS: {t.latitude}, {t.longitude}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between pt-2 border-t border-border">
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedId(t.id);
+                              }}
+                              className={`text-xs px-3 py-1.5 rounded-xl font-bold transition ${
+                                isSelected
+                                  ? "bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30"
+                                  : "button secondary"
+                              }`}
+                            >
+                              {isSelected ? "Active Competition" : "Set Active"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedId(t.id);
+                                setView("Overview");
+                              }}
+                              className="button secondary text-xs px-3 py-1.5"
+                            >
+                              Open Hub
+                            </button>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <a
+                              href={`/tournament/${t.id}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="p-2 text-muted-foreground hover:text-primary transition rounded-lg hover:bg-muted"
+                              title="Open Public Showcase"
+                            >
+                              <Globe size={16} />
+                            </a>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                if (t.id.startsWith("tourney-")) {
+                                  alert("System benchmark tournaments are protected and cannot be deleted.");
+                                  return;
+                                }
+                                if (confirm(`Delete tournament "${t.name}"?`)) {
+                                  await handleSaveAction({ action: "deleteTournament", tournamentId: t.id });
+                                  if (selectedId === t.id) {
+                                    const remaining = data.tournaments.filter((item) => item.id !== t.id);
+                                    setSelectedId(remaining.length ? remaining[0].id : "");
+                                  }
+                                }
+                              }}
+                              className="p-2 text-muted-foreground hover:text-rose-500 transition rounded-lg hover:bg-muted"
+                              title={t.id.startsWith("tourney-") ? "Benchmark tournament is protected" : "Delete Tournament"}
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -1303,7 +1832,7 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
 
       {/* Modals */}
       {createOpen && <CreateTournament onClose={() => setCreateOpen(false)} onSaved={handleSaveAction} />}
-      {teamOpen && <AddTeamModal divisions={activeDivisions} onClose={() => setTeamOpen(false)} onSaved={handleSaveAction} />}
+      {teamOpen && <AddTeamModal divisions={activeDivisions} clubs={data.clubs} onClose={() => setTeamOpen(false)} onSaved={handleSaveAction} />}
       {fixtureOpen && (
         <GenerateFixturesModal divisions={activeDivisions} onClose={() => setFixtureOpen(false)} onSaved={handleSaveAction} />
       )}

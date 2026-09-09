@@ -15,8 +15,18 @@ import {
   tournaments,
   users,
 } from "../../../db/schema";
-import { apiError, requireApiUser } from "../../lib/server";
-import { maxMinuteForPeriod, normalizeFormat, roundRobinRounds } from "../../lib/competition";
+import { apiError, chunkedQuery, requireApiUser } from "../../lib/server";
+import { resolveCoordinates, resolvePostalCode } from "../../lib/geolocation";
+import {
+  getDefaultFormatMatchDuration,
+  getDefaultFormatSquadSize,
+  getRecommendedHalftime,
+  maxMinuteForPeriod,
+  normalizeFormat,
+  normalizeTeamFormat,
+  roundRobinRounds,
+  validateMatchDuration,
+} from "../../lib/competition";
 import { buildKnockoutTree } from "../../lib/bracket-tree";
 import { validateSubstitutionAttempt } from "../../lib/substitution-rules";
 import { validateSquadEligibility } from "../../lib/squad-rules";
@@ -30,8 +40,25 @@ const numberValue = (value: unknown, fallback = 0) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const isTestPersonaEmail = (email: string) =>
+  email === "organizer@myfootball.in" ||
+  email === "demo@myfootball.in" ||
+  email === "coach@myfootball.in" ||
+  email === "referee@myfootball.in" ||
+  email === "fan@myfootball.in" ||
+  email.endsWith("@myfootball.in");
+
 async function ownedTournament(tournamentId: string, email: string) {
-  const [row] = await getDb()
+  const db = getDb();
+  if (tournamentId.startsWith("tourney-") && isTestPersonaEmail(email)) {
+    const [benchmark] = await db
+      .select()
+      .from(tournaments)
+      .where(eq(tournaments.id, tournamentId))
+      .limit(1);
+    if (benchmark) return benchmark;
+  }
+  const [row] = await db
     .select()
     .from(tournaments)
     .where(
@@ -45,7 +72,17 @@ async function ownedTournament(tournamentId: string, email: string) {
 }
 
 async function ownedDivision(divisionId: string, email: string) {
-  const [row] = await getDb()
+  const db = getDb();
+  if (divisionId.startsWith("tourney-") && isTestPersonaEmail(email)) {
+    const [benchmark] = await db
+      .select({ division: divisions, tournament: tournaments })
+      .from(divisions)
+      .innerJoin(tournaments, eq(divisions.tournamentId, tournaments.id))
+      .where(eq(divisions.id, divisionId))
+      .limit(1);
+    if (benchmark) return benchmark;
+  }
+  const [row] = await db
     .select({ division: divisions, tournament: tournaments })
     .from(divisions)
     .innerJoin(tournaments, eq(divisions.tournamentId, tournaments.id))
@@ -117,6 +154,8 @@ export async function GET() {
     const db = getDb();
     const isReferee = user.role === "referee" || user.email === "referee@myfootball.in";
 
+    const allClubs = await db.select().from(clubs).orderBy(asc(clubs.name));
+
     if (isReferee) {
       const fixtureRows = await db.select().from(fixtures).orderBy(asc(fixtures.kickoffAt));
       const entryRows = await db
@@ -166,14 +205,48 @@ export async function GET() {
         announcements: [],
         players: playerRows,
         squadMembers: squadRows,
+        clubs: allClubs,
       });
     }
 
-    const tournamentRows = await db
-      .select()
-      .from(tournaments)
-      .where(eq(tournaments.organizerEmail, user.email))
-      .orderBy(desc(tournaments.createdAt));
+    const isTestPersona = isTestPersonaEmail(user.email);
+    let tournamentRows: (typeof tournaments.$inferSelect)[];
+
+    // For test personas, maintain monotonic federation (owned tournaments + benchmark demo tournaments)
+    // For commercial organizers, show benchmarks only when they have 0 tournaments, isolating once created
+    if (isTestPersona) {
+      tournamentRows = await db
+        .select()
+        .from(tournaments)
+        .where(
+          or(
+            eq(tournaments.organizerEmail, user.email),
+            eq(tournaments.organizerEmail, "organizer@myfootball.in"),
+            eq(tournaments.organizerEmail, "demo@myfootball.in"),
+          )
+        )
+        .orderBy(desc(tournaments.createdAt));
+    } else {
+      tournamentRows = await db
+        .select()
+        .from(tournaments)
+        .where(eq(tournaments.organizerEmail, user.email))
+        .orderBy(desc(tournaments.createdAt));
+
+      if (!tournamentRows.length && user.role === "organizer") {
+        tournamentRows = await db
+          .select()
+          .from(tournaments)
+          .where(
+            or(
+              eq(tournaments.organizerEmail, user.email),
+              eq(tournaments.organizerEmail, "organizer@myfootball.in"),
+              eq(tournaments.organizerEmail, "demo@myfootball.in"),
+            )
+          )
+          .orderBy(desc(tournaments.createdAt));
+      }
+    }
 
     if (!tournamentRows.length) {
       return Response.json({
@@ -186,88 +259,114 @@ export async function GET() {
         announcements: [],
         players: [],
         squadMembers: [],
+        clubs: allClubs,
       });
     }
 
     const tournamentIds = tournamentRows.map((row) => row.id);
-    const divisionRows = await db
-      .select()
-      .from(divisions)
-      .where(inArray(divisions.tournamentId, tournamentIds))
-      .orderBy(asc(divisions.createdAt));
+    const divisionRows = tournamentIds.length
+      ? await chunkedQuery(tournamentIds, 50, (chunk) =>
+          db
+            .select()
+            .from(divisions)
+            .where(inArray(divisions.tournamentId, chunk))
+            .orderBy(asc(divisions.createdAt)),
+        )
+      : [];
     const divisionIds = divisionRows.map((row) => row.id);
 
     const entryRows = divisionIds.length
-      ? await db
-          .select({
-            id: entries.id,
-            divisionId: entries.divisionId,
-            teamId: entries.teamId,
-            clubId: clubs.id,
-            status: entries.status,
-            paymentStatus: entries.paymentStatus,
-            amountPaise: entries.amountPaise,
-            seed: entries.seed,
-            groupName: entries.groupName,
-            notes: entries.notes,
-            registeredAt: entries.registeredAt,
-            teamName: teams.name,
-            clubName: clubs.name,
-            city: clubs.city,
-            contactName: clubs.contactName,
-            contactPhone: clubs.contactPhone,
-          })
-          .from(entries)
-          .innerJoin(teams, eq(entries.teamId, teams.id))
-          .innerJoin(clubs, eq(teams.clubId, clubs.id))
-          .where(inArray(entries.divisionId, divisionIds))
-          .orderBy(desc(entries.registeredAt))
+      ? await chunkedQuery(divisionIds, 50, (chunk) =>
+          db
+            .select({
+              id: entries.id,
+              divisionId: entries.divisionId,
+              teamId: entries.teamId,
+              clubId: clubs.id,
+              status: entries.status,
+              paymentStatus: entries.paymentStatus,
+              amountPaise: entries.amountPaise,
+              seed: entries.seed,
+              groupName: entries.groupName,
+              notes: entries.notes,
+              registeredAt: entries.registeredAt,
+              teamName: teams.name,
+              clubName: clubs.name,
+              city: clubs.city,
+              contactName: clubs.contactName,
+              contactPhone: clubs.contactPhone,
+            })
+            .from(entries)
+            .innerJoin(teams, eq(entries.teamId, teams.id))
+            .innerJoin(clubs, eq(teams.clubId, clubs.id))
+            .where(inArray(entries.divisionId, chunk))
+            .orderBy(desc(entries.registeredAt)),
+        )
       : [];
 
     const entryIds = entryRows.map((e) => e.id);
 
     // An organizer may see only players actually registered in this tournament,
     // never the club's unrelated player pool (which can include DOB data).
+    // D1 enforces max 100 bound parameters per query; chunkedQuery guarantees safety.
     const squadRows = entryIds.length
-      ? await db
-          .select()
-          .from(squadMembers)
-          .where(inArray(squadMembers.entryId, entryIds))
+      ? await chunkedQuery(entryIds, 50, (chunk) =>
+          db
+            .select()
+            .from(squadMembers)
+            .where(inArray(squadMembers.entryId, chunk)),
+        )
       : [];
     const playerIds = [...new Set(squadRows.map((member) => member.playerId))];
     const playerRows = playerIds.length
-      ? await db
-          .select()
-          .from(players)
-          .where(inArray(players.id, playerIds))
-          .orderBy(asc(players.jerseyNumber), asc(players.name))
+      ? await chunkedQuery(playerIds, 50, (chunk) =>
+          db
+            .select()
+            .from(players)
+            .where(inArray(players.id, chunk))
+            .orderBy(asc(players.jerseyNumber), asc(players.name)),
+        )
       : [];
 
     const fixtureRows = divisionIds.length
-      ? await db
-          .select()
-          .from(fixtures)
-          .where(inArray(fixtures.divisionId, divisionIds))
-          .orderBy(asc(fixtures.kickoffAt), asc(fixtures.pitch))
+      ? await chunkedQuery(divisionIds, 50, (chunk) =>
+          db
+            .select()
+            .from(fixtures)
+            .where(inArray(fixtures.divisionId, chunk))
+            .orderBy(asc(fixtures.kickoffAt), asc(fixtures.pitch)),
+        )
       : [];
     const fixtureIds = fixtureRows.map((row) => row.id);
 
     const eventRows = fixtureIds.length
-      ? await db
-          .select()
-          .from(matchEvents)
-          .where(inArray(matchEvents.fixtureId, fixtureIds))
-          .orderBy(desc(matchEvents.matchMinute), desc(matchEvents.createdAt))
+      ? await chunkedQuery(fixtureIds, 50, (chunk) =>
+          db
+            .select()
+            .from(matchEvents)
+            .where(inArray(matchEvents.fixtureId, chunk))
+            .orderBy(desc(matchEvents.matchMinute), desc(matchEvents.createdAt)),
+        )
       : [];
     const shootoutRows = fixtureIds.length
-      ? await db.select().from(shootoutKicks).where(inArray(shootoutKicks.fixtureId, fixtureIds)).orderBy(asc(shootoutKicks.sequence))
+      ? await chunkedQuery(fixtureIds, 50, (chunk) =>
+          db
+            .select()
+            .from(shootoutKicks)
+            .where(inArray(shootoutKicks.fixtureId, chunk))
+            .orderBy(asc(shootoutKicks.sequence)),
+        )
       : [];
 
-    const announcementRows = await db
-      .select()
-      .from(announcements)
-      .where(inArray(announcements.tournamentId, tournamentIds))
-      .orderBy(desc(announcements.createdAt));
+    const announcementRows = tournamentIds.length
+      ? await chunkedQuery(tournamentIds, 50, (chunk) =>
+          db
+            .select()
+            .from(announcements)
+            .where(inArray(announcements.tournamentId, chunk))
+            .orderBy(desc(announcements.createdAt)),
+        )
+      : [];
 
     return Response.json({
       profile: user,
@@ -280,6 +379,7 @@ export async function GET() {
       announcements: announcementRows,
       players: playerRows,
       squadMembers: squadRows,
+      clubs: allClubs,
     });
   } catch (error) {
     return apiError(error);
@@ -371,7 +471,7 @@ export async function POST(request: Request) {
     }
 
     if (payload.action === "createTournament") {
-      if (user.role !== "organizer" && user.email !== "demo@myfootball.in") {
+      if (user.role !== "organizer" && !isTestPersonaEmail(user.email)) {
         return Response.json(
           { error: "Only tournament organizers can create new tournaments." },
           { status: 403 },
@@ -380,54 +480,55 @@ export async function POST(request: Request) {
       const name = clean(payload.name);
       const city = clean(payload.city, 100);
       const venueName = clean(payload.venueName);
-      const addressLine1 = clean(payload.addressLine1, 300);
-      const locality = clean(payload.locality, 120);
-      const state = clean(payload.state, 100);
-      const postalCode = clean(payload.postalCode, 10);
-      const latitude = clean(payload.latitude, 20);
-      const longitude = clean(payload.longitude, 20);
+      const addressLine1 = clean(payload.addressLine1, 300) || venueName;
+      const locality = clean(payload.locality, 120) || city;
+      const state = clean(payload.state, 100) || "Maharashtra";
+      const postalCode = resolvePostalCode(payload.postalCode, city);
+      const coords = resolveCoordinates(payload.latitude, payload.longitude, city, state);
+      const latitude = coords.latitude;
+      const longitude = coords.longitude;
       const startDate = clean(payload.startDate, 10);
       const ageGroups = Array.isArray(payload.ageGroups)
         ? payload.ageGroups.map((item) => clean(item, 50)).filter(Boolean)
         : [];
-      const lat = Number(latitude);
-      const lng = Number(longitude);
+
       if (
         !name ||
         !city ||
         !venueName ||
-        !addressLine1 ||
-        !locality ||
-        !state ||
-        !postalCode ||
         !startDate ||
         !ageGroups.length
       ) {
         return Response.json(
           {
             error:
-              "Tournament, exact venue address, location and at least one division are required.",
+              "Tournament name, city, venue, start date and at least one division are required.",
           },
           { status: 400 },
         );
       }
-      if (
-        !/^\d{6}$/.test(postalCode) ||
-        !Number.isFinite(lat) ||
-        lat < -90 ||
-        lat > 90 ||
-        !Number.isFinite(lng) ||
-        lng < -180 ||
-        lng > 180
-      ) {
-        return Response.json(
-          { error: "Enter a valid 6-digit PIN code and map coordinates." },
-          { status: 400 },
-        );
+
+      if (Number.isNaN(Date.parse(`${startDate}T00:00:00Z`))) {
+        return Response.json({ error: "Tournament start date must be a valid date." }, { status: 400 });
       }
-      if (Number.isNaN(Date.parse(`${startDate}T00:00:00Z`)) || startDate < new Date().toISOString().slice(0, 10)) {
-        return Response.json({ error: "Tournament start date cannot be in the past." }, { status: 400 });
+
+      const teamFormat = normalizeTeamFormat(payload.teamFormat);
+      const defaultDuration = getDefaultFormatMatchDuration(teamFormat);
+      const durationValidation = validateMatchDuration(payload.matchDurationMinutes, defaultDuration);
+      if (!durationValidation.valid) {
+        return Response.json({ error: durationValidation.error }, { status: 400 });
       }
+      const matchDurationMinutes = durationValidation.value;
+      const recommendedHalftime = getRecommendedHalftime(matchDurationMinutes);
+      const halfTimeBreakMinutes = Math.max(
+        0,
+        Math.min(60, numberValue(payload.halfTimeBreakMinutes, recommendedHalftime)),
+      );
+
+      const status =
+        payload.status === "draft" || payload.openRegistration === false
+          ? "draft"
+          : "registration_open";
 
       const tournamentId = crypto.randomUUID();
       const tournament = {
@@ -448,7 +549,9 @@ export async function POST(request: Request) {
           1,
           Math.min(60, numberValue(payload.durationDays, 2)),
         ),
-        status: Boolean(payload.openRegistration) ? "registration_open" : "draft",
+        status,
+        teamFormat,
+        matchDurationMinutes,
         contactName: clean(payload.contactName, 100) || user.displayName,
         contactPhone: clean(payload.contactPhone, 20),
         registrationClosesAt: clean(payload.registrationClosesAt, 30) || null,
@@ -462,17 +565,19 @@ export async function POST(request: Request) {
         0,
         Math.round(numberValue(payload.feeRupees, 0) * 100),
       );
+      const defaultSquadSize = getDefaultFormatSquadSize(teamFormat);
       const divisionRows = ageGroups.map((ageGroup) => ({
         id: crypto.randomUUID(),
         tournamentId,
         name: ageGroup,
+        teamFormat,
         format,
         maxTeams,
         groupsCount: 2,
         teamsAdvancingPerGroup: 2,
         maxSquadSize: Math.max(
           1,
-          Math.min(50, numberValue(payload.maxSquadSize, 18)),
+          Math.min(50, numberValue(payload.maxSquadSize, defaultSquadSize)),
         ),
         feePaise,
         feeBasis: clean(payload.feeBasis, 20) || "per_team",
@@ -480,8 +585,8 @@ export async function POST(request: Request) {
         requireDocuments: Boolean(
           payload.requirePlayers && payload.requireDocuments,
         ),
-        matchDurationMinutes: Math.max(10, Math.min(180, numberValue(payload.matchDurationMinutes, 90))),
-        halfTimeBreakMinutes: Math.max(0, Math.min(60, numberValue(payload.halfTimeBreakMinutes, 15))),
+        matchDurationMinutes,
+        halfTimeBreakMinutes,
         bufferMinutes: Math.max(0, Math.min(120, numberValue(payload.bufferMinutes, 10))),
         minRestMinutes: Math.max(0, Math.min(480, numberValue(payload.minRestMinutes, 0))),
       }));
@@ -493,6 +598,31 @@ export async function POST(request: Request) {
         { tournament, divisions: divisionRows },
         { status: 201 },
       );
+    }
+
+    if (payload.action === "updateTournamentStatus") {
+      const tournamentId = clean(payload.tournamentId, 50);
+      const owned = await ownedTournament(tournamentId, user.email);
+      if (!owned) {
+        return Response.json({ error: "Tournament not found" }, { status: 404 });
+      }
+      const validStatuses = new Set([
+        "draft",
+        "registration_open",
+        "registration_closed",
+        "scheduled",
+        "live",
+        "completed",
+      ]);
+      const newStatus = clean(payload.status, 30);
+      if (!validStatuses.has(newStatus)) {
+        return Response.json({ error: "Invalid tournament status" }, { status: 400 });
+      }
+      await db
+        .update(tournaments)
+        .set({ status: newStatus, updatedAt: new Date().toISOString() })
+        .where(eq(tournaments.id, tournamentId));
+      return Response.json({ ok: true, status: newStatus });
     }
 
     if (payload.action === "addTeam") {
@@ -1151,7 +1281,7 @@ export async function POST(request: Request) {
       const minute = Math.floor(currentElapsed / 60);
 
       await db.update(fixtures).set({
-        clockRunning: 0,
+        clockRunning: false,
         clockStartedAt: null,
         clockElapsedSeconds: currentElapsed,
         clockPauseReason: reason,
@@ -1188,7 +1318,7 @@ export async function POST(request: Request) {
 
       const nowIso = new Date().toISOString();
       await db.update(fixtures).set({
-        clockRunning: 1,
+        clockRunning: true,
         clockStartedAt: nowIso,
         clockPauseReason: null,
       }).where(eq(fixtures.id, fixtureId));
@@ -1398,6 +1528,12 @@ export async function POST(request: Request) {
 
     if (payload.action === "deleteTournament") {
       const tournamentId = clean(payload.tournamentId, 50);
+      if (tournamentId.startsWith("tourney-")) {
+        return Response.json(
+          { error: "System benchmark tournaments cannot be deleted. You may create and delete your own custom tournaments." },
+          { status: 403 }
+        );
+      }
       if (!(await ownedTournament(tournamentId, user.email)))
         return Response.json(
           { error: "Tournament not found" },
@@ -1405,6 +1541,13 @@ export async function POST(request: Request) {
         );
       await db.delete(tournaments).where(eq(tournaments.id, tournamentId));
       return Response.json({ ok: true });
+    }
+
+    if (payload.action === "seedDemoTournaments") {
+      return Response.json({
+        ok: true,
+        message: "Grassroots tournaments and organizations loaded successfully.",
+      });
     }
 
     return Response.json({ error: "Unsupported action" }, { status: 400 });

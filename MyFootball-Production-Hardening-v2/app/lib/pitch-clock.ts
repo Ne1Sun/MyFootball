@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useRef, useState } from "react";
 
@@ -96,7 +96,7 @@ export interface PitchClockState {
 export function calculatePitchClock(
   fixture?: PitchClockFixtureInput | null,
   nominalHalfMinutes: number = 45,
-  clientNowMs: number = Date.now()
+  clientNowMs: number | null = Date.now()
 ): PitchClockState {
   const isRunning = Boolean(fixture?.clockRunning);
   const status = fixture?.status || "scheduled";
@@ -108,8 +108,8 @@ export function calculatePitchClock(
   // Base accumulated seconds
   let totalSeconds = Math.max(0, fixture?.clockElapsedSeconds || 0);
 
-  // If clock is actively ticking and match is in progress
-  if (isRunning && status === "in_progress" && fixture?.clockStartedAt) {
+  // If clock is actively ticking and match is in progress (and not in hydration freeze mode where clientNowMs is null)
+  if (isRunning && status === "in_progress" && fixture?.clockStartedAt && clientNowMs !== null) {
     const startedMs = Date.parse(fixture.clockStartedAt);
     if (!Number.isNaN(startedMs) && clientNowMs > startedMs) {
       const liveDelta = Math.floor((clientNowMs - startedMs) / 1000);
@@ -173,8 +173,9 @@ export function usePitchClock(
   fixture?: PitchClockFixtureInput | null,
   nominalHalfMinutes: number = 45
 ): PitchClockState {
+  // Deterministic initial state: Evaluates static baseline without wall-clock drift to match SSR HTML exactly
   const [clockState, setClockState] = useState<PitchClockState>(() =>
-    calculatePitchClock(fixture, nominalHalfMinutes, Date.now())
+    calculatePitchClock(fixture, nominalHalfMinutes, null)
   );
 
   const perfAnchorRef = useRef<number>(typeof performance !== "undefined" ? performance.now() : 0);

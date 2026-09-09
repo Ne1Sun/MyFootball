@@ -1,3 +1,5 @@
+export type TeamFormat = "5v5" | "7v7" | "11v11";
+
 export type Tournament = {
   id: string;
   name: string;
@@ -13,6 +15,8 @@ export type Tournament = {
   startDate: string;
   durationDays: number;
   status: string;
+  teamFormat?: TeamFormat;
+  matchDurationMinutes?: number;
   contactName: string;
   contactPhone: string;
   createdAt: string;
@@ -23,6 +27,7 @@ export type Division = {
   tournamentId: string;
   name: string;
   format: string;
+  teamFormat?: TeamFormat;
   maxSquadSize: number;
   maxTeams: number;
   groupsCount: number;
@@ -135,6 +140,16 @@ export type Announcement = {
   createdAt: string;
 };
 
+export type Club = {
+  id: string;
+  ownerEmail: string;
+  name: string;
+  organizationType: string;
+  city: string;
+  contactName: string;
+  contactPhone: string;
+};
+
 export type AppData = {
   tournaments: Tournament[];
   divisions: Division[];
@@ -144,4 +159,5 @@ export type AppData = {
   announcements: Announcement[];
   players: Player[];
   squadMembers: SquadMember[];
+  clubs?: Club[];
 };

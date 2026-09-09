@@ -1,0 +1,19 @@
+{
+  "name": "myfootball-india",
+  "main": "dist/server/index.js",
+  "compatibility_date": "2026-05-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "dist/client"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "myfootball-db",
+      "database_id": "c577822d-12fc-42ef-a835-749ec942f9b0"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

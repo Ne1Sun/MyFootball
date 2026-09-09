@@ -1,4 +1,73 @@
 export type CompetitionFormat = "single_round_robin" | "double_round_robin" | "knockout" | "group_knockout";
+export type TeamFormat = "5v5" | "7v7" | "11v11";
+
+export function normalizeTeamFormat(value: unknown): TeamFormat {
+  if (typeof value !== "string") return "11v11";
+  const cleaned = value.trim().toLowerCase();
+  if (cleaned === "5v5" || cleaned === "5-a-side" || cleaned === "5aside" || cleaned === "5") return "5v5";
+  if (cleaned === "7v7" || cleaned === "7-a-side" || cleaned === "7aside" || cleaned === "7") return "7v7";
+  return "11v11";
+}
+
+export function getDefaultFormatSquadSize(format: TeamFormat): number {
+  if (format === "5v5") return 10;
+  if (format === "7v7") return 14;
+  return 18;
+}
+
+export function getDefaultFormatMatchDuration(format: TeamFormat): number {
+  if (format === "5v5") return 40;
+  if (format === "7v7") return 50;
+  return 90;
+}
+
+export function getRecommendedHalftime(totalMinutes: number): number {
+  if (totalMinutes <= 40) return 5;
+  if (totalMinutes <= 60) return 10;
+  return 15;
+}
+
+export function getFormatDurationPresets(format: TeamFormat): number[] {
+  if (format === "5v5") return [20, 30, 40, 50];
+  if (format === "7v7") return [40, 50, 60, 70];
+  return [60, 70, 80, 90];
+}
+
+export function validateMatchDuration(
+  val: unknown,
+  fallback = 90
+): { valid: boolean; value: number; error?: string } {
+  if (val === undefined || val === null || val === "") {
+    return { valid: true, value: fallback };
+  }
+  if (typeof val !== "number" && typeof val !== "string") {
+    return { valid: false, value: fallback, error: "Match duration must be a valid number in minutes." };
+  }
+  if (typeof val === "string" && val.trim() === "") {
+    return { valid: true, value: fallback };
+  }
+  const num = typeof val === "number" ? val : Number(val);
+  if (Number.isNaN(num) || !Number.isFinite(num)) {
+    return { valid: false, value: fallback, error: "Match duration must be a valid number in minutes." };
+  }
+  if (!Number.isInteger(num)) {
+    return { valid: false, value: fallback, error: "Match duration must be a whole integer without decimals." };
+  }
+  if (num < 10) {
+    return { valid: false, value: fallback, error: "Match duration must be at least 10 minutes." };
+  }
+  if (num > 180) {
+    return { valid: false, value: fallback, error: "Match duration cannot exceed 180 minutes." };
+  }
+  if (num % 2 !== 0) {
+    return {
+      valid: false,
+      value: fallback,
+      error: `Match duration must be an even number cleanly divisible by 2 so both regulation halves are equal whole numbers (${num / 2} min halves are not permitted). Suggested: ${num - 1} min or ${num + 1} min.`
+    };
+  }
+  return { valid: true, value: num };
+}
 
 export const knockoutRounds = (teams: number) =>
   teams < 2 ? 0 : Math.ceil(Math.log2(teams));

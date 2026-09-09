@@ -15,6 +15,7 @@ export interface DivisionContext {
   id: string;
   name: string;
   ageCutoffDate?: string | null;
+  teamFormat?: string | null;
   maxSquadSize: number;
   requirePlayers?: boolean | null;
   requireDocuments?: boolean | null;
@@ -191,8 +192,12 @@ export function validateSquadEligibility(
 
   // 3. Starting Lineup Invariants (when starting lineup is designated)
   if (startingCount > 0) {
-    if (startingCount > 11) {
-      errors.push(`Starting lineup has ${startingCount} players. Maximum is 11.`);
+    const format = (division.teamFormat || "11v11").toLowerCase();
+    const maxStarters = format === "5v5" ? 5 : format === "7v7" ? 7 : 11;
+    if (startingCount > maxStarters) {
+      errors.push(
+        `Starting lineup has ${startingCount} players. Maximum is ${maxStarters} for ${division.teamFormat || "11v11"} match format.`,
+      );
     }
 
     if (goalkeeperCount === 0) {

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { getDb } from "../../../../db";
-import { users } from "../../../../db/schema";
+import { clubs, teams, users } from "../../../../db/schema";
 import { hashPassword, signSession, verifyPassword } from "../../../lib/auth-crypto";
 
 const MASTER_TEST_PASSWORD = process.env.MASTER_TEST_PASSWORD || "Grassroots@2026";
@@ -83,6 +83,50 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid email or password." }, { status: 401 });
     }
 
+    const displayName = userRecord?.fullName || PRECONFIGURED_PERSONAS[email]?.name || email.split("@")[0] || "User";
+
+    // Synchronize active role in persistent store
+    await db
+      .update(users)
+      .set({
+        role: activeRole,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(users.email, email));
+
+    // Dynamic Provisioning on Role Pivot: Ensure Coach has an owned Club & Team
+    if (activeRole === "coach") {
+      const existingClubs = await db
+        .select()
+        .from(clubs)
+        .where(eq(clubs.ownerEmail, email))
+        .limit(1);
+
+      if (existingClubs.length === 0) {
+        const clubId = `club-${crypto.randomUUID().slice(0, 8)}`;
+        const academyName = `${displayName}'s Football Academy`;
+        const now = new Date().toISOString();
+
+        await db.insert(clubs).values({
+          id: clubId,
+          ownerEmail: email,
+          name: academyName,
+          organizationType: "academy",
+          city: userRecord?.preferredCity || "Mumbai",
+          contactName: displayName,
+          contactPhone: "+91 90000 00000",
+          createdAt: now,
+        });
+
+        await db.insert(teams).values({
+          id: `team-${crypto.randomUUID().slice(0, 8)}`,
+          clubId,
+          name: `${academyName} Squad`,
+          createdAt: now,
+        });
+      }
+    }
+
     // Determine target dashboard based on selected active role
     const targetUrl =
       activeRole === "organizer"
@@ -92,8 +136,6 @@ export async function POST(request: Request) {
         : activeRole === "referee"
         ? "/referee"
         : "/discover";
-
-    const displayName = userRecord?.fullName || PRECONFIGURED_PERSONAS[email]?.name || email.split("@")[0] || "User";
 
     const sessionPayload = {
       email,

@@ -608,60 +608,159 @@ export function CoachPortalClient({ initialData }: { initialData: CoachPortalDat
               </Link>
             </div>
 
-            {clubEntries.length === 0 ? (
-              <div className="p-8 rounded-2xl bg-card border border-border text-center space-y-3">
-                <Trophy size={36} className="text-muted-foreground mx-auto" />
-                <h4 className="text-sm font-bold text-foreground">No Tournament Registrations Yet</h4>
-                <p className="text-xs text-muted-foreground max-w-sm mx-auto">
-                  Your club has not entered any competitions yet. Browse open grassroots and youth tournaments to enroll your squad.
-                </p>
-                <Link
-                  href="/discover"
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-bold shadow-sm hover:opacity-90 transition"
-                >
-                  <Compass size={14} /> Browse Available Tournaments
-                </Link>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {clubEntries.map((entry) => {
-                  const div = data.divisions.find((d) => d.id === entry.divisionId);
-                  const tourney = data.tournaments.find((t) => t.id === div?.tournamentId);
-                  return (
-                    <div key={entry.id} className="interactive-card panel-card p-5 rounded-2xl bg-card border border-border space-y-3 shadow-sm">
-                      <div className="flex items-center justify-between">
-                        <span className="px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-600 text-xs font-bold uppercase">
-                          {entry.status}
-                        </span>
-                        <span className="text-xs text-muted-foreground">Payment: {entry.paymentStatus}</span>
-                      </div>
-                      <div>
-                        <h4 className="font-extrabold text-base text-foreground">{tourney?.name}</h4>
-                        <p className="text-xs text-muted-foreground">{div?.name} • Assigned: {entry.groupName}</p>
-                      </div>
-                      {tourney && (
-                        <div className="pt-2 border-t border-border flex items-center justify-between">
-                          <Link
-                            href={`/tournament/${tourney.id}`}
-                            className="text-xs font-bold text-amber-500 hover:underline flex items-center gap-1"
-                          >
-                            <span>View Tournament Hub</span>
-                            <ExternalLink size={12} />
-                          </Link>
-                          <Link
-                            href={`/register/${tourney.id}`}
-                            className="text-xs font-bold text-emerald-500 hover:underline flex items-center gap-1"
-                          >
-                            <span>Enroll Another Team</span>
-                            <Plus size={12} />
-                          </Link>
+            {/* Active Registrations */}
+            {clubEntries.length > 0 && (
+              <div className="space-y-3">
+                <h4 className="font-extrabold text-base text-foreground flex items-center gap-2">
+                  <ShieldCheck size={16} className="text-emerald-500" /> Active Registrations
+                </h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {clubEntries.map((entry) => {
+                    const div = data.divisions.find((d) => d.id === entry.divisionId);
+                    const tourney = data.tournaments.find((t) => t.id === div?.tournamentId);
+                    return (
+                      <div key={entry.id} className="interactive-card panel-card p-5 rounded-2xl bg-card border border-border space-y-3 shadow-sm">
+                        <div className="flex items-center justify-between">
+                          <span className="px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-600 text-xs font-bold uppercase">
+                            {entry.status}
+                          </span>
+                          <span className="text-xs text-muted-foreground">Payment: {entry.paymentStatus}</span>
                         </div>
-                      )}
-                    </div>
-                  );
-                })}
+                        <div>
+                          <h4 className="font-extrabold text-base text-foreground">{tourney?.name}</h4>
+                          <p className="text-xs text-muted-foreground">{div?.name} • Assigned: {entry.groupName}</p>
+                        </div>
+                        {tourney && (
+                          <div className="pt-2 border-t border-border flex items-center justify-between">
+                            <Link
+                              href={`/tournament/${tourney.id}`}
+                              className="text-xs font-bold text-amber-500 hover:underline flex items-center gap-1"
+                            >
+                              <span>View Tournament Hub</span>
+                              <ExternalLink size={12} />
+                            </Link>
+                            <Link
+                              href={`/register/${tourney.id}`}
+                              className="text-xs font-bold text-emerald-500 hover:underline flex items-center gap-1"
+                            >
+                              <span>Enroll Another Team</span>
+                              <Plus size={12} />
+                            </Link>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             )}
+
+            {/* Open Competitions Available for Enrollment */}
+            {(() => {
+              const enrolledTournamentIds = new Set(
+                clubEntries
+                  .map((e) => data.divisions.find((d) => d.id === e.divisionId)?.tournamentId)
+                  .filter(Boolean) as string[]
+              );
+              const openTournaments = data.tournaments.filter(
+                (t) =>
+                  ["registration_open", "live", "scheduled"].includes(t.status) &&
+                  !enrolledTournamentIds.has(t.id)
+              );
+              if (openTournaments.length === 0) {
+                return clubEntries.length === 0 ? (
+                  <div className="p-8 rounded-2xl bg-card border border-border text-center space-y-3">
+                    <Trophy size={36} className="text-muted-foreground mx-auto" />
+                    <h4 className="text-sm font-bold text-foreground">No Open Competitions Found</h4>
+                    <p className="text-xs text-muted-foreground max-w-sm mx-auto">
+                      No tournaments are currently open for registration. Browse the Discover page to find upcoming competitions.
+                    </p>
+                    <Link
+                      href="/discover"
+                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-bold shadow-sm hover:opacity-90 transition"
+                    >
+                      <Compass size={14} /> Browse Available Tournaments
+                    </Link>
+                  </div>
+                ) : null;
+              }
+              return (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Sparkles size={16} className="text-amber-500" />
+                    <h4 className="font-extrabold text-base text-foreground">Open Competitions — Enroll Your Squad</h4>
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 text-xs font-bold border border-emerald-500/30">
+                      {openTournaments.length} available
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    These competitions are open for team registration. Click &quot;Enroll Squad&quot; to register your academy.
+                  </p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {openTournaments.map((tourney) => {
+                      const tDivs = data.divisions.filter((d) => d.tournamentId === tourney.id);
+                      const statusColor =
+                        tourney.status === "live"
+                          ? "bg-rose-500/15 text-rose-600 dark:text-rose-400 border-rose-500/30"
+                          : tourney.status === "registration_open"
+                          ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
+                          : "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30";
+                      return (
+                        <div
+                          key={tourney.id}
+                          className="interactive-card panel-card p-5 rounded-2xl bg-card border border-emerald-500/20 space-y-3 shadow-sm hover:border-emerald-500/50 transition"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className={`px-2.5 py-1 rounded-full text-xs font-bold uppercase border ${statusColor}`}>
+                              {tourney.status === "live" && <span className="inline-block w-1.5 h-1.5 rounded-full bg-rose-500 animate-ping mr-1" />}
+                              {(tourney.status || "").replace("_", " ")}
+                            </span>
+                            <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full border ${
+                              tourney.teamFormat === "5v5"
+                                ? "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400 border-cyan-500/30"
+                                : tourney.teamFormat === "7v7"
+                                ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
+                                : "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30"
+                            }`}>
+                              {tourney.teamFormat === "5v5" ? "⚡ 5v5" : tourney.teamFormat === "7v7" ? "🌱 7v7" : "🏆 11v11"}
+                            </span>
+                          </div>
+                          <div>
+                            <h4 className="font-extrabold text-base text-foreground">{tourney.name}</h4>
+                            <p className="text-xs text-muted-foreground">
+                              {tourney.organizedBy} • {tourney.city}, {tourney.state}
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5 text-[11px] text-muted-foreground font-semibold">
+                            <span className="px-2 py-0.5 rounded-md bg-muted border border-border">
+                              🏆 {tDivs.length} {tDivs.length === 1 ? "Division" : "Divisions"}
+                            </span>
+                            <span className="px-2 py-0.5 rounded-md bg-muted border border-border flex items-center gap-1">
+                              <MapPin size={10} />{tourney.venueName}
+                            </span>
+                          </div>
+                          <div className="pt-2 border-t border-border flex items-center justify-between gap-2">
+                            <Link
+                              href={`/tournament/${tourney.id}`}
+                              className="text-xs font-bold text-amber-500 hover:underline flex items-center gap-1"
+                            >
+                              <span>View Hub</span>
+                              <ExternalLink size={12} />
+                            </Link>
+                            <Link
+                              href={`/register/${tourney.id}`}
+                              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-black bg-gradient-to-r from-emerald-500 to-amber-500 text-slate-950 shadow-sm hover:opacity-95 transition"
+                            >
+                              <ShieldCheck size={13} /> Enroll Squad
+                            </Link>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         )}
       </main>

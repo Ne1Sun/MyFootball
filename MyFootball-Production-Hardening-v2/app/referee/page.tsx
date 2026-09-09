@@ -29,7 +29,7 @@ export default async function RefereePage() {
     .where(eq(users.email, user.email))
     .limit(1);
 
-  const effectiveRole = profile?.role || user.role || "fan";
+  const effectiveRole = user.role || profile?.role || "fan";
 
   // Strict RBAC Guard: Only match officials/referees can access the pitch console
   if (effectiveRole !== "referee") {
@@ -84,8 +84,9 @@ export default async function RefereePage() {
     user: {
       email: user.email,
       displayName: user.displayName || user.fullName || "Official Referee",
+      role: effectiveRole,
     },
   };
 
-  return <RefereeConsoleClient initialData={initialData} />;
+  return <RefereeConsoleClient initialData={initialData as any} />;
 }

@@ -245,7 +245,7 @@ export default async function Home() {
         </div>
 
         {/* Featured Live Tournament Spotlight */}
-        {tournamentRows.length > 0 && (
+        {tournamentRows.length > 0 ? (
           <div className="cascade-4 space-y-4 pt-10">
             <div className="flex items-center justify-between">
               <div>
@@ -302,6 +302,26 @@ export default async function Home() {
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+        ) : (
+          <div className="cascade-4 space-y-4 pt-10">
+            <div className="p-8 rounded-3xl bg-card border border-border text-center space-y-3 shadow-sm max-w-xl mx-auto">
+              <div className="w-12 h-12 rounded-2xl bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 flex items-center justify-center font-bold mx-auto">
+                <Trophy size={24} />
+              </div>
+              <h3 className="text-lg font-black text-foreground">No Tournaments Currently Published</h3>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                Be the first to bring modern digital tournament administration to your region. Setup brackets, entry forms, and live scoreboards in minutes.
+              </p>
+              <div className="pt-2">
+                <Link
+                  href="/organize"
+                  className="inline-flex items-center gap-2 min-h-[44px] px-5 py-2 rounded-xl bg-primary text-primary-foreground font-bold text-xs active:scale-[0.975] transition-transform"
+                >
+                  <Trophy size={14} /> Host Your First Tournament
+                </Link>
+              </div>
             </div>
           </div>
         )}
