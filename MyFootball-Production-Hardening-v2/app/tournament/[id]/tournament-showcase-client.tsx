@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
   Award,
@@ -41,6 +41,8 @@ import { AppHeader } from "../../components/layout/AppHeader";
 import { AppFooter } from "../../components/layout/AppFooter";
 import { BroadcastScorebug } from "../../components/broadcast/BroadcastScorebug";
 import { WhatsAppScorecardCard } from "../../components/social/WhatsAppScorecardCard";
+import { KnockoutBracket } from "../../components/brackets/KnockoutBracket";
+import { resolveGroupStandings } from "../../lib/standings-engine";
 
 type PublicTournamentData = {
   tournament: Tournament;
@@ -52,7 +54,7 @@ type PublicTournamentData = {
   squadMembers?: SquadMember[];
   announcements: Array<{ id: string; tournamentId: string; body: string; audience: string; createdAt: string }>;
   isFollowed: boolean;
-  user: { email: string; displayName: string } | null;
+  user: { email: string; displayName: string; role?: string } | null;
 };
 
 export function TournamentShowcaseClient({ initialData }: { initialData: PublicTournamentData }) {
@@ -129,6 +131,16 @@ export function TournamentShowcaseClient({ initialData }: { initialData: PublicT
     setTimeout(() => setCopied(false), 2500);
   };
 
+  // Deep link ?tab= query sync
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const tab = params.get("tab");
+    if (tab && ["matches", "tactics", "brackets", "standings", "honors", "announcements"].includes(tab)) {
+      setActiveTab(tab as any);
+    }
+  }, []);
+
   const googleMapsUrl =
     tournament.latitude && tournament.longitude
       ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
@@ -138,36 +150,20 @@ export function TournamentShowcaseClient({ initialData }: { initialData: PublicT
           `${tournament.venueName}, ${tournament.city}, ${tournament.state}`
         )}`;
 
-  // Standings calculation
+  // Official AIFF / AFC / FIFA Group Standings with H2H and Disciplinary Tie-Breaking
   const groupedStandings = useMemo(() => {
     if (!division) return {};
-    const groups: Record<string, Array<{ entry: Entry; p: number; w: number; d: number; l: number; gf: number; ga: number; gd: number; pts: number; form: Array<"W"|"D"|"L"> }>> = {};
-
-    data.entries.filter((e) => e.divisionId === division.id).forEach((entry) => {
-      const gName = entry.groupName || "Group A";
-      if (!groups[gName]) groups[gName] = [];
-      groups[gName].push({ entry, p: 0, w: 0, d: 0, l: 0, gf: 0, ga: 0, gd: 0, pts: 0, form: [] });
-    });
-
-    divisionFixtures.filter((f) => f.stage === "group" && f.status === "completed").forEach((f) => {
-      for (const list of Object.values(groups)) {
-        const home = list.find((item) => item.entry.id === f.homeEntryId);
-        const away = list.find((item) => item.entry.id === f.awayEntryId);
-        if (home && away) {
-          home.p += 1; away.p += 1; home.gf += f.homeScore; home.ga += f.awayScore; away.gf += f.awayScore; away.ga += f.homeScore;
-          if (f.homeScore > f.awayScore) { home.w += 1; away.l += 1; home.pts += division.winPoints; away.pts += division.lossPoints; home.form.push("W"); away.form.push("L"); }
-          else if (f.homeScore < f.awayScore) { away.w += 1; home.l += 1; away.pts += division.winPoints; home.pts += division.lossPoints; away.form.push("W"); home.form.push("L"); }
-          else { home.d += 1; away.d += 1; home.pts += division.drawPoints; away.pts += division.drawPoints; home.form.push("D"); away.form.push("D"); }
-        }
-      }
-    });
-
-    for (const [groupName, list] of Object.entries(groups)) {
-      list.forEach((item) => (item.gd = item.gf - item.ga));
-      groups[groupName] = list.sort((a, b) => b.pts - a.pts || b.gd - a.gd || b.gf - a.gf);
-    }
-    return groups;
-  }, [division, data.entries, divisionFixtures]);
+    const divEntries = data.entries.filter((e) => e.divisionId === division.id);
+    const divFixtures = divisionFixtures.filter((f) => f.stage === "group");
+    return resolveGroupStandings(
+      divEntries,
+      divFixtures,
+      data.events,
+      division.winPoints,
+      division.drawPoints,
+      division.lossPoints
+    );
+  }, [division, data.entries, divisionFixtures, data.events]);
 
   // Leaderboards calculation
   const topScorers = useMemo(() => {
@@ -259,12 +255,12 @@ export function TournamentShowcaseClient({ initialData }: { initialData: PublicT
                   <span>{following ? "Following" : "Follow"}</span>
                 </button>
 
-                {tournament.status === "registration_open" && (
+                {["registration_open", "scheduled", "live"].includes(tournament.status) && data.user?.role === "coach" && (
                   <a
                     href={`/register/${tournament.id}`}
-                    className="interactive-button inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-primary text-primary-foreground font-extrabold text-xs shadow-lg hover:opacity-90 transition"
+                    className="interactive-button inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-gradient-to-r from-emerald-500 to-amber-500 text-slate-950 font-black text-xs shadow-lg hover:opacity-90 transition"
                   >
-                    <Plus size={14} /> Register Team
+                    <Plus size={14} /> Enroll Team / Squad
                   </a>
                 )}
               </div>
@@ -523,86 +519,17 @@ export function TournamentShowcaseClient({ initialData }: { initialData: PublicT
         {/* TAB 3: KNOCKOUT TREE */}
         {activeTab === "brackets" && (
           <div className="cascade-3 space-y-6">
-            <div className="panel-card p-6 rounded-3xl bg-card border border-border space-y-6 overflow-x-auto shadow-xl">
-              <div className="min-w-[760px] grid grid-cols-3 gap-8 items-center">
-                {/* Semi Finals */}
-                <div className="space-y-4">
-                  <div className="text-center font-bold text-xs uppercase tracking-widest text-muted-foreground pb-2 border-b border-border">
-                    Semi-Finals
-                  </div>
-                  {semiFinals.map((sf, idx) => {
-                    const h = data.entries.find((e) => e.id === sf.homeEntryId);
-                    const a = data.entries.find((e) => e.id === sf.awayEntryId);
-                    return (
-                      <div
-                        key={sf.id}
-                        onClick={() => setSelectedMatchModal(sf)}
-                        className="interactive-card p-3.5 rounded-xl bg-muted/40 hover:bg-muted/70 transition border border-border cursor-pointer space-y-2"
-                      >
-                        <span className="text-[10px] font-bold text-muted-foreground uppercase">Semi-Final {idx + 1}</span>
-                        <div className="flex items-center justify-between text-xs font-bold text-foreground">
-                          <span>{h?.teamName || "TBD"}</span>
-                          <span className="font-mono">{sf.status === "completed" ? sf.homeScore : "-"}</span>
-                        </div>
-                        <div className="flex items-center justify-between text-xs font-bold text-foreground">
-                          <span>{a?.teamName || "TBD"}</span>
-                          <span className="font-mono">{sf.status === "completed" ? sf.awayScore : "-"}</span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* Connector */}
-                <div className="text-center space-y-2">
-                  <div className="w-12 h-12 mx-auto rounded-full bg-amber-500/15 border-2 border-amber-500/40 flex items-center justify-center text-amber-500 font-black text-sm animate-trophy-pulse">
-                    🏆
-                  </div>
-                  <div className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Championship Pathway</div>
-                </div>
-
-                {/* Final & 3rd Place */}
-                <div className="space-y-4">
-                  <div className="text-center font-bold text-xs uppercase tracking-widest text-amber-500 pb-2 border-b border-amber-500/30">
-                    Grand Final & 3rd Place
-                  </div>
-                  {finalMatch && (
-                    <div
-                      onClick={() => setSelectedMatchModal(finalMatch)}
-                      className="interactive-card p-4 rounded-xl bg-gradient-to-br from-amber-500/15 via-background to-card border-2 border-amber-500/40 hover:border-amber-500 transition cursor-pointer space-y-2 shadow-lg shadow-amber-500/5"
-                    >
-                      <span className="text-[10px] font-black text-amber-500 uppercase flex items-center gap-1">
-                        <Crown size={12} /> 🏆 Grand Championship Final
-                      </span>
-                      <div className="flex items-center justify-between text-sm font-bold text-foreground">
-                        <span>{data.entries.find((e) => e.id === finalMatch.homeEntryId)?.teamName || "TBD"}</span>
-                        <span className="font-mono font-black">{finalMatch.homeScore}</span>
-                      </div>
-                      <div className="flex items-center justify-between text-sm font-bold text-foreground">
-                        <span>{data.entries.find((e) => e.id === finalMatch.awayEntryId)?.teamName || "TBD"}</span>
-                        <span className="font-mono font-black">{finalMatch.awayScore}</span>
-                      </div>
-                    </div>
-                  )}
-
-                  {bronzeMatch && (
-                    <div
-                      onClick={() => setSelectedMatchModal(bronzeMatch)}
-                      className="interactive-card p-3.5 rounded-xl bg-muted/40 hover:bg-muted/70 transition border border-border cursor-pointer space-y-2"
-                    >
-                      <span className="text-[10px] font-bold text-muted-foreground uppercase">🥉 3rd Place Playoff</span>
-                      <div className="flex items-center justify-between text-xs font-bold text-foreground">
-                        <span>{data.entries.find((e) => e.id === bronzeMatch.homeEntryId)?.teamName || "TBD"}</span>
-                        <span className="font-mono">{bronzeMatch.homeScore}</span>
-                      </div>
-                      <div className="flex items-center justify-between text-xs font-bold text-foreground">
-                        <span>{data.entries.find((e) => e.id === bronzeMatch.awayEntryId)?.teamName || "TBD"}</span>
-                        <span className="font-mono">{bronzeMatch.awayScore}</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
+            <div className="panel-card p-6 rounded-3xl bg-card border border-border shadow-xl">
+              <KnockoutBracket
+                divisions={division ? [division] : data.divisions}
+                entries={data.entries}
+                fixtures={divisionFixtures}
+                onOpenMatchday={(fixtureId) => {
+                  const fix = data.fixtures.find((f) => f.id === fixtureId);
+                  if (fix) setSelectedMatchModal(fix);
+                }}
+                readOnly={true}
+              />
             </div>
           </div>
         )}
@@ -631,6 +558,8 @@ export function TournamentShowcaseClient({ initialData }: { initialData: PublicT
                         <th className="py-2.5 px-3 text-center">W</th>
                         <th className="py-2.5 px-3 text-center">D</th>
                         <th className="py-2.5 px-3 text-center">L</th>
+                        <th className="py-2.5 px-3 text-center">GF</th>
+                        <th className="py-2.5 px-3 text-center">GA</th>
                         <th className="py-2.5 px-3 text-center">GD</th>
                         <th className="py-2.5 px-3 text-right">Pts</th>
                         <th className="py-2.5 px-3 text-center">Form</th>
@@ -647,7 +576,14 @@ export function TournamentShowcaseClient({ initialData }: { initialData: PublicT
                                 <Shield size={16} className={qualifies ? "text-emerald-500" : "text-muted-foreground"} />
                                 <div>
                                   <strong className="text-foreground">{row.entry.teamName}</strong>
-                                  <div className="text-[11px] text-muted-foreground">{row.entry.clubName}</div>
+                                  <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                                    <span>{row.entry.clubName}</span>
+                                    {row.tieBreakerReason && (
+                                      <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 font-semibold text-[10px]">
+                                        {row.tieBreakerReason}
+                                      </span>
+                                    )}
+                                  </div>
                                 </div>
                               </div>
                             </td>
@@ -655,6 +591,8 @@ export function TournamentShowcaseClient({ initialData }: { initialData: PublicT
                             <td className="py-3 px-3 text-center font-mono text-emerald-600 dark:text-emerald-400">{row.w}</td>
                             <td className="py-3 px-3 text-center font-mono text-amber-600 dark:text-amber-400">{row.d}</td>
                             <td className="py-3 px-3 text-center font-mono text-rose-600 dark:text-rose-400">{row.l}</td>
+                            <td className="py-3 px-3 text-center font-mono text-muted-foreground">{row.gf}</td>
+                            <td className="py-3 px-3 text-center font-mono text-muted-foreground">{row.ga}</td>
                             <td className="py-3 px-3 text-center font-mono font-bold">{row.gd > 0 ? `+${row.gd}` : row.gd}</td>
                             <td className="py-3 px-3 text-right font-mono font-black text-primary text-base">{row.pts}</td>
                             <td className="py-3 px-3 text-center">

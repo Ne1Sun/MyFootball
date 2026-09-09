@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Award,
   Crown,
@@ -29,6 +29,7 @@ export interface TacticalPitchProps {
   onFormationChange?: (formation: Formation) => void;
   isInteractive?: boolean;
   onSwapPlayer?: (playerOnPitchId: string, benchPlayerId: string) => void;
+  onSwapPitchPositions?: (player1Id: string, player2Id: string) => void;
   onBenchPlayer?: (playerId: string) => void;
 }
 
@@ -242,6 +243,7 @@ export function TacticalPitch({
   onFormationChange,
   isInteractive = true,
   onSwapPlayer,
+  onSwapPitchPositions,
   onBenchPlayer,
 }: TacticalPitchProps) {
   const [internalFormation, setInternalFormation] = useState<Formation>("4-3-3");
@@ -249,14 +251,25 @@ export function TacticalPitch({
 
   const [selectedPitchPlayer, setSelectedPitchPlayer] = useState<Player | null>(null);
   const [benchPositionFilter, setBenchPositionFilter] = useState<string>("ALL");
+  const [customSlotMap, setCustomSlotMap] = useState<Record<string, number> | null>(null);
+  const [tacticalFeedback, setTacticalFeedback] = useState<string | null>(null);
+  const feedbackTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+    };
+  }, []);
 
   const handleSelectFormation = (f: Formation) => {
     setInternalFormation(f);
+    setCustomSlotMap(null);
+    setSelectedPitchPlayer(null);
     onFormationChange?.(f);
   };
 
-  // Group starting players intelligently to match formation slots
-  const playerCoordinates = useMemo(() => {
+  // Base slot list for the active formation
+  const formationSlots = useMemo(() => {
     const config = FORMATION_CONFIGS[activeFormation] || FORMATION_CONFIGS["4-3-3"];
     const allSlots: SlotCoordinate[] = [];
 
@@ -272,27 +285,25 @@ export function TacticalPitch({
         });
       });
     }
+    return allSlots;
+  }, [activeFormation]);
+
+  // Group starting players intelligently to match formation slots
+  const playerCoordinates = useMemo(() => {
+    const allSlots = formationSlots;
 
     // Separate players by preferred position
     const gkPool = startingPlayers.filter((p) => p.position === "GK");
     const defPool = startingPlayers.filter((p) => p.position === "DEF");
     const midPool = startingPlayers.filter((p) => p.position === "MID");
     const fwdPool = startingPlayers.filter((p) => p.position === "FWD");
-    const otherPool = startingPlayers.filter(
-      (p) => !["GK", "DEF", "MID", "FWD"].includes(p.position)
-    );
 
     const usedPlayerIds = new Set<string>();
-    const assigned: Array<{
+    const defaultAssigned: Array<{
       player: Player;
-      x: number;
-      y: number;
-      role: "GK" | "DEF" | "MID" | "FWD";
-      lineSize: number;
-      lineIndex: number;
+      slotIndex: number;
     }> = [];
 
-    // Helper to grab next available player from a pool
     const takeFrom = (pool: Player[]): Player | undefined => {
       const p = pool.find((item) => !usedPlayerIds.has(item.id));
       if (p) {
@@ -302,30 +313,26 @@ export function TacticalPitch({
       return undefined;
     };
 
-    // 1. Assign GK slot
-    const gkSlot = allSlots.find((s) => s.role === "GK");
-    if (gkSlot) {
+    // 1. Assign GK slot (slot 0)
+    if (allSlots.length > 0 && allSlots[0].role === "GK") {
       const gk = takeFrom(gkPool) || takeFrom(startingPlayers);
       if (gk) {
-        assigned.push({ player: gk, ...gkSlot });
+        defaultAssigned.push({ player: gk, slotIndex: 0 });
       }
     }
 
     // 2. Assign outfield slots matching position preference
-    for (const slot of allSlots) {
-      if (slot.role === "GK") continue;
+    for (let i = 0; i < allSlots.length; i++) {
+      if (allSlots[i].role === "GK") continue;
+      const slot = allSlots[i];
       let player: Player | undefined;
 
-      if (slot.role === "DEF") {
-        player = takeFrom(defPool);
-      } else if (slot.role === "MID") {
-        player = takeFrom(midPool);
-      } else if (slot.role === "FWD") {
-        player = takeFrom(fwdPool);
-      }
+      if (slot.role === "DEF") player = takeFrom(defPool);
+      else if (slot.role === "MID") player = takeFrom(midPool);
+      else if (slot.role === "FWD") player = takeFrom(fwdPool);
 
       if (player) {
-        assigned.push({ player, ...slot });
+        defaultAssigned.push({ player, slotIndex: i });
       }
     }
 
@@ -333,21 +340,85 @@ export function TacticalPitch({
     const remainingUnplaced = startingPlayers.filter((p) => !usedPlayerIds.has(p.id));
     let unplacedIdx = 0;
 
-    for (const slot of allSlots) {
-      const alreadyAssigned = assigned.some((a) => a.x === slot.x && a.y === slot.y);
+    for (let i = 0; i < allSlots.length; i++) {
+      const alreadyAssigned = defaultAssigned.some((a) => a.slotIndex === i);
       if (!alreadyAssigned && unplacedIdx < remainingUnplaced.length) {
         const p = remainingUnplaced[unplacedIdx++];
         usedPlayerIds.add(p.id);
-        assigned.push({ player: p, ...slot });
+        defaultAssigned.push({ player: p, slotIndex: i });
       }
     }
 
-    return assigned;
-  }, [startingPlayers, activeFormation]);
+    // Apply custom slot overrides if on-pitch swaps occurred
+    return defaultAssigned.map(({ player, slotIndex }) => {
+      const activeSlotIndex =
+        customSlotMap && customSlotMap[player.id] !== undefined
+          ? customSlotMap[player.id]
+          : slotIndex;
+      const slot = allSlots[activeSlotIndex] || allSlots[slotIndex] || allSlots[0];
+      return {
+        player,
+        slotIndex: activeSlotIndex,
+        x: slot.x,
+        y: slot.y,
+        role: slot.role,
+        lineSize: slot.lineSize,
+        lineIndex: slot.lineIndex,
+      };
+    });
+  }, [startingPlayers, formationSlots, customSlotMap]);
 
   const handlePlayerClick = (player: Player) => {
     if (!isInteractive) return;
+
+    // If a player is ALREADY selected on pitch, and the user clicked a DIFFERENT player on pitch:
+    // Execute on-pitch positional swap!
+    if (selectedPitchPlayer && selectedPitchPlayer.id !== player.id) {
+      const playerA = selectedPitchPlayer;
+      const playerB = player;
+
+      const coordA = playerCoordinates.find((pc) => pc.player.id === playerA.id);
+      const coordB = playerCoordinates.find((pc) => pc.player.id === playerB.id);
+
+      if (coordA && coordB) {
+        setCustomSlotMap((prev) => {
+          const currentMap = { ...(prev || {}) };
+          // Initialize map with current slot indices if empty
+          if (!prev) {
+            playerCoordinates.forEach((pc) => {
+              currentMap[pc.player.id] = pc.slotIndex;
+            });
+          }
+          // Swap their slot indices
+          const slotA = currentMap[playerA.id] ?? coordA.slotIndex;
+          const slotB = currentMap[playerB.id] ?? coordB.slotIndex;
+          currentMap[playerA.id] = slotB;
+          currentMap[playerB.id] = slotA;
+          return currentMap;
+        });
+
+        onSwapPitchPositions?.(playerA.id, playerB.id);
+        setTacticalFeedback(
+          `Swapped positions: #${playerA.jerseyNumber} ${playerA.name} ⇄ #${playerB.jerseyNumber} ${playerB.name}`
+        );
+        if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+        feedbackTimerRef.current = setTimeout(() => setTacticalFeedback(null), 3500);
+      }
+
+      setSelectedPitchPlayer(null);
+      return;
+    }
+
+    // Otherwise toggle selection
     setSelectedPitchPlayer((prev) => (prev?.id === player.id ? null : player));
+  };
+
+  const handleResetPositions = () => {
+    setCustomSlotMap(null);
+    setSelectedPitchPlayer(null);
+    setTacticalFeedback("Tactical positions reset to default formation slots");
+    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+    feedbackTimerRef.current = setTimeout(() => setTacticalFeedback(null), 2500);
   };
 
   const handleExecuteSwap = (benchPlayer: Player) => {
@@ -377,28 +448,50 @@ export function TacticalPitch({
             </strong>
             <span className="text-[11px] text-muted-foreground">
               {startingPlayers.length} On Pitch • {FORMATION_CONFIGS[activeFormation]?.label || activeFormation}
+              {customSlotMap && " • Custom Positions"}
             </span>
           </div>
         </div>
 
-        {/* Compact Multi-Formation Selector */}
-        <div className="flex items-center flex-wrap gap-1 p-1 rounded-xl bg-muted/70 border border-border">
-          {FORMATIONS.map((f) => (
+        {/* Tactical Actions & Formation Selector */}
+        <div className="flex items-center flex-wrap gap-2">
+          {customSlotMap && (
             <button
-              key={f}
-              onClick={() => handleSelectFormation(f)}
-              aria-label={`Formation ${f}`}
-              className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold transition min-h-[32px] ${
-                activeFormation === f
-                  ? "bg-primary text-primary-foreground shadow-xs ring-1 ring-primary/30"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted"
-              }`}
+              onClick={handleResetPositions}
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-400 hover:bg-amber-500/25 text-xs font-bold transition min-h-[32px] border border-amber-500/30"
+              title="Reset player positions back to formation defaults"
             >
-              {f}
+              <RotateCcw size={13} /> Reset Positions
             </button>
-          ))}
+          )}
+
+          {/* Compact Multi-Formation Selector */}
+          <div className="flex items-center flex-wrap gap-1 p-1 rounded-xl bg-muted/70 border border-border">
+            {FORMATIONS.map((f) => (
+              <button
+                key={f}
+                onClick={() => handleSelectFormation(f)}
+                aria-label={`Formation ${f}`}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold transition min-h-[32px] ${
+                  activeFormation === f
+                    ? "bg-primary text-primary-foreground shadow-xs ring-1 ring-primary/30"
+                    : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                }`}
+              >
+                {f}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
+
+      {/* Real-time Feedback Banner */}
+      {tacticalFeedback && (
+        <div className="p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300 text-xs font-bold flex items-center gap-2 animate-in fade-in slide-in-from-top-1 shadow-xs">
+          <Zap size={14} className="shrink-0 text-emerald-500" />
+          <span>{tacticalFeedback}</span>
+        </div>
+      )}
 
       {/* 2D Grass Football Pitch Board */}
       <div className="football-pitch relative w-full aspect-[4/3] sm:aspect-[16/11] max-h-[560px] flex items-center justify-center shadow-2xl rounded-2xl overflow-hidden border border-emerald-950">
@@ -440,6 +533,7 @@ export function TacticalPitch({
         {playerCoordinates.map(({ player, x, y, lineSize, lineIndex }) => {
           const isGK = player.position === "GK";
           const isSelected = selectedPitchPlayer?.id === player.id;
+          const isSwapTargetCandidate = selectedPitchPlayer && !isSelected;
 
           // SEC-04: Spatial deconfliction for lines with 4+ players on mobile (<480px)
           const needsDeconfliction = lineSize >= 4;
@@ -457,10 +551,23 @@ export function TacticalPitch({
               }}
               role="button"
               tabIndex={isInteractive ? 0 : -1}
-              aria-label={`#${player.jerseyNumber} ${player.name} (${player.position})`}
+              aria-label={
+                isSwapTargetCandidate
+                  ? `Click to swap position with #${selectedPitchPlayer.jerseyNumber} ${selectedPitchPlayer.name}`
+                  : `#${player.jerseyNumber} ${player.name} (${player.position})`
+              }
+              title={
+                isSwapTargetCandidate
+                  ? `Click to swap with #${selectedPitchPlayer.jerseyNumber} ${selectedPitchPlayer.name}`
+                  : player.name
+              }
               style={{ left: `${x}%`, top: `${y}%` }}
-              className={`player-pitch-token absolute -translate-x-1/2 -translate-y-1/2 flex flex-col items-center cursor-pointer min-w-[44px] min-h-[44px] justify-center p-1 select-none transition-transform focus:outline-none ${
-                isSelected ? "z-30 scale-120" : "z-10 hover:scale-110"
+              className={`player-pitch-token absolute -translate-x-1/2 -translate-y-1/2 flex flex-col items-center cursor-pointer min-w-[44px] min-h-[44px] justify-center p-1 select-none transition-transform focus:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 rounded-2xl ${
+                isSelected
+                  ? "z-30 scale-120"
+                  : isSwapTargetCandidate
+                  ? "z-20 hover:scale-115"
+                  : "z-10 hover:scale-110"
               }`}
             >
               {/* Token Disc - Minimum 44px Touch Target Zone */}
@@ -468,6 +575,8 @@ export function TacticalPitch({
                 className={`relative w-9 h-9 sm:w-11 sm:h-11 rounded-full flex items-center justify-center font-mono font-black text-xs sm:text-sm shadow-xl border-2 transition ${
                   isSelected
                     ? "border-amber-400 bg-amber-500 text-slate-950 ring-4 ring-amber-400/50 scale-110"
+                    : isSwapTargetCandidate
+                    ? "border-emerald-400/90 bg-gradient-to-b from-slate-900 via-slate-800 to-slate-950 text-white ring-2 ring-emerald-400/60 ring-dashed"
                     : isGK
                     ? "border-amber-300 bg-gradient-to-b from-amber-400 to-amber-600 text-slate-950"
                     : "border-white bg-gradient-to-b from-slate-900 via-slate-800 to-slate-950 text-white"
@@ -485,7 +594,13 @@ export function TacticalPitch({
 
               {/* Name Tag with SEC-04 mobile vertical staggering (±12px) */}
               <div
-                className={`mt-0.5 px-1.5 py-0.5 rounded-md bg-slate-950/85 backdrop-blur-sm border border-white/20 text-[10px] sm:text-[11px] font-bold text-white max-w-[80px] sm:max-w-[100px] truncate text-center shadow-md transition-all ${
+                className={`mt-0.5 px-1.5 py-0.5 rounded-md bg-slate-950/85 backdrop-blur-sm border text-[10px] sm:text-[11px] font-bold text-white max-w-[80px] sm:max-w-[100px] truncate text-center shadow-md transition-all ${
+                  isSelected
+                    ? "border-amber-400 text-amber-300"
+                    : isSwapTargetCandidate
+                    ? "border-emerald-400/70 text-emerald-200"
+                    : "border-white/20"
+                } ${
                   needsDeconfliction
                     ? isStaggerOdd
                       ? "translate-y-[10px] sm:translate-y-0"
@@ -523,11 +638,19 @@ export function TacticalPitch({
 
             <button
               onClick={() => setSelectedPitchPlayer(null)}
-              className="p-1.5 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition"
+              className="p-1.5 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition min-w-[36px] min-h-[36px] flex items-center justify-center"
               aria-label="Close drawer"
             >
               <X size={16} />
             </button>
+          </div>
+
+          {/* Tactical Prompt Banner */}
+          <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center gap-2 text-xs text-amber-700 dark:text-amber-300 font-medium">
+            <RotateCcw size={14} className="shrink-0 text-amber-500" />
+            <span>
+              <strong>Tactical Actions:</strong> Tap any teammate on the pitch to swap positions, or select a bench player below to substitute.
+            </span>
           </div>
 
           {/* Quick Swap with Bench */}

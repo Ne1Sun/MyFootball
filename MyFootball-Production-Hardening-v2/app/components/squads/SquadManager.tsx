@@ -33,6 +33,7 @@ export function SquadManager({
   const [squadTab, setSquadTab] = useState<"pitch" | "list">("pitch");
   const [showAddPlayer, setShowAddPlayer] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [squadError, setSquadError] = useState<string | null>(null);
 
   const selectedEntry = entries.find((e) => e.id === selectedEntryId) || entries[0];
   const division = divisions.find((d) => d.id === selectedEntry?.divisionId);
@@ -82,6 +83,11 @@ export function SquadManager({
 
   const handleToggleStarting = async (playerId: string, currentStarting: boolean) => {
     if (!selectedEntry) return;
+    if (!currentStarting && startingLineup.length >= 11) {
+      setSquadError("Starting Limit: A team can have a maximum of 11 starting players on the pitch.");
+      setTimeout(() => setSquadError(null), 4000);
+      return;
+    }
     setBusy(true);
     const updatedSquad = entrySquad.map((sm) => {
       if (sm.playerId === playerId) {
@@ -97,8 +103,33 @@ export function SquadManager({
     setBusy(false);
   };
 
+  const handleSwapPlayers = async (pitchId: string, benchId: string) => {
+    if (!selectedEntry) return;
+    setBusy(true);
+    const updatedSquad = entrySquad.map((sm) => {
+      if (sm.playerId === pitchId) {
+        return { ...sm, isStarting: false };
+      }
+      if (sm.playerId === benchId) {
+        return { ...sm, isStarting: true };
+      }
+      return sm;
+    });
+    await onSaveAction({
+      action: "updateSquad",
+      entryId: selectedEntry.id,
+      squad: updatedSquad,
+    });
+    setBusy(false);
+  };
+
   const handleAddToSquad = async (playerId: string) => {
     if (!selectedEntry) return;
+    if (division?.maxSquadSize && entrySquad.length >= division.maxSquadSize) {
+      setSquadError(`Squad Cap Reached: Maximum squad limit of ${division.maxSquadSize} players reached for this division.`);
+      setTimeout(() => setSquadError(null), 4000);
+      return;
+    }
     setBusy(true);
     const updatedSquad = [
       ...entrySquad,
@@ -223,6 +254,20 @@ export function SquadManager({
           </button>
         </div>
 
+      {/* In-app Squad Warning / Error Banner */}
+      {squadError && (
+        <div className="p-3.5 rounded-2xl bg-rose-500/15 border border-rose-500/30 text-rose-700 dark:text-rose-300 text-xs font-bold flex items-center justify-between gap-2 animate-in fade-in slide-in-from-top-1 shadow-xs">
+          <span>{squadError}</span>
+          <button
+            onClick={() => setSquadError(null)}
+            className="p-1 rounded-lg hover:bg-rose-500/20 text-rose-700 dark:text-rose-300 transition"
+            aria-label="Dismiss message"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
       {/* 2D Tactical Football Pitch Board View */}
       {squadTab === "pitch" && (
         <div className="panel-card p-6 rounded-3xl bg-card border border-border space-y-4">
@@ -230,10 +275,8 @@ export function SquadManager({
             startingPlayers={startingLineup}
             benchPlayers={substitutes}
             teamName={selectedEntry?.teamName}
-            onSwapPlayer={(pitchId, benchId) => {
-              void handleToggleStarting(pitchId, true);
-              void handleToggleStarting(benchId, false);
-            }}
+            isInteractive={!busy}
+            onSwapPlayer={handleSwapPlayers}
             onBenchPlayer={(pitchId) => {
               void handleToggleStarting(pitchId, true);
             }}

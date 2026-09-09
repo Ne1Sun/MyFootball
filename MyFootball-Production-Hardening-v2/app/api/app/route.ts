@@ -2,6 +2,7 @@ import { and, asc, desc, eq, inArray, or } from "drizzle-orm";
 import { getDb } from "../../../db";
 import {
   announcements,
+  auditLog,
   clubs,
   divisions,
   entries,
@@ -16,6 +17,9 @@ import {
 } from "../../../db/schema";
 import { apiError, requireApiUser } from "../../lib/server";
 import { maxMinuteForPeriod, normalizeFormat, roundRobinRounds } from "../../lib/competition";
+import { buildKnockoutTree } from "../../lib/bracket-tree";
+import { validateSubstitutionAttempt } from "../../lib/substitution-rules";
+import { validateSquadEligibility } from "../../lib/squad-rules";
 
 type Payload = Record<string, unknown> & { action?: string };
 
@@ -52,12 +56,18 @@ async function ownedDivision(divisionId: string, email: string) {
   return row;
 }
 
-async function fixtureForOfficial(fixtureId: string, email: string) {
+async function fixtureForOfficial(fixtureId: string, email: string, role?: string) {
   const [row] = await getDb().select({ fixture: fixtures, division: divisions, tournament: tournaments })
     .from(fixtures).innerJoin(divisions, eq(fixtures.divisionId, divisions.id))
     .innerJoin(tournaments, eq(divisions.tournamentId, tournaments.id))
-    .where(and(eq(fixtures.id, fixtureId), eq(tournaments.organizerEmail, email))).limit(1);
-  return row;
+    .where(eq(fixtures.id, fixtureId)).limit(1);
+  if (!row) return null;
+  const isAuthorized =
+    row.tournament.organizerEmail === email ||
+    role === "referee" ||
+    role === "organizer" ||
+    email === "referee@myfootball.in";
+  return isAuthorized ? row : null;
 }
 
 async function recalculateScore(fixtureId: string) {
@@ -105,6 +115,60 @@ export async function GET() {
     if (!user)
       return Response.json({ error: "Sign in required" }, { status: 401 });
     const db = getDb();
+    const isReferee = user.role === "referee" || user.email === "referee@myfootball.in";
+
+    if (isReferee) {
+      const fixtureRows = await db.select().from(fixtures).orderBy(asc(fixtures.kickoffAt));
+      const entryRows = await db
+        .select({
+          id: entries.id,
+          divisionId: entries.divisionId,
+          teamId: entries.teamId,
+          clubId: clubs.id,
+          status: entries.status,
+          paymentStatus: entries.paymentStatus,
+          amountPaise: entries.amountPaise,
+          seed: entries.seed,
+          groupName: entries.groupName,
+          notes: entries.notes,
+          registeredAt: entries.registeredAt,
+          teamName: teams.name,
+          clubName: clubs.name,
+          city: clubs.city,
+          contactName: clubs.contactName,
+          contactPhone: clubs.contactPhone,
+        })
+        .from(entries)
+        .innerJoin(teams, eq(entries.teamId, teams.id))
+        .innerJoin(clubs, eq(teams.clubId, clubs.id));
+
+      const divisionRows = await db.select().from(divisions);
+      const tournamentRows = await db.select().from(tournaments);
+      const playerRows = await db.select().from(players);
+      const squadRows = await db.select().from(squadMembers);
+      const eventRows = await db
+        .select()
+        .from(matchEvents)
+        .orderBy(desc(matchEvents.matchMinute), desc(matchEvents.createdAt));
+      const shootoutRows = await db
+        .select()
+        .from(shootoutKicks)
+        .orderBy(asc(shootoutKicks.sequence));
+
+      return Response.json({
+        profile: user,
+        tournaments: tournamentRows,
+        divisions: divisionRows,
+        entries: entryRows,
+        fixtures: fixtureRows,
+        events: eventRows,
+        shootoutKicks: shootoutRows,
+        announcements: [],
+        players: playerRows,
+        squadMembers: squadRows,
+      });
+    }
+
     const tournamentRows = await db
       .select()
       .from(tournaments)
@@ -307,6 +371,12 @@ export async function POST(request: Request) {
     }
 
     if (payload.action === "createTournament") {
+      if (user.role !== "organizer" && user.email !== "demo@myfootball.in") {
+        return Response.json(
+          { error: "Only tournament organizers can create new tournaments." },
+          { status: 403 },
+        );
+      }
       const name = clean(payload.name);
       const city = clean(payload.city, 100);
       const venueName = clean(payload.venueName);
@@ -456,6 +526,18 @@ export async function POST(request: Request) {
       const approved = Boolean(payload.approved);
       const groupName = clean(payload.groupName, 20) || (currentEntries.length % 2 === 0 ? "Group A" : "Group B");
 
+      // Verify capacity immediately prior to batch insert
+      const freshCheck = await db
+        .select({ id: entries.id })
+        .from(entries)
+        .where(eq(entries.divisionId, divisionId));
+      if (freshCheck.length >= owned.division.maxTeams) {
+        return Response.json(
+          { error: "This division has reached its maximum team capacity." },
+          { status: 409 },
+        );
+      }
+
       await db.batch([
         db.insert(clubs).values({
           id: clubId,
@@ -484,7 +566,7 @@ export async function POST(request: Request) {
     if (payload.action === "updateEntry") {
       const entryId = clean(payload.entryId, 50);
       const [owned] = await db
-        .select({ entry: entries })
+        .select({ entry: entries, tournament: tournaments })
         .from(entries)
         .innerJoin(divisions, eq(entries.divisionId, divisions.id))
         .innerJoin(tournaments, eq(divisions.tournamentId, tournaments.id))
@@ -502,6 +584,14 @@ export async function POST(request: Request) {
         clean(payload.paymentStatus, 20) || owned.entry.paymentStatus;
       const groupName = clean(payload.groupName, 20) || owned.entry.groupName;
 
+      // Grassroots Commerce Invariant: Cannot approve entry with unpaid fee
+      if (status === "approved" && owned.entry.amountPaise > 0 && paymentStatus === "unpaid") {
+        return Response.json(
+          { error: "Cannot approve entry with unpaid registration fee. Mark payment as 'paid' or 'waived' first." },
+          { status: 400 }
+        );
+      }
+
       await db
         .update(entries)
         .set({
@@ -514,6 +604,26 @@ export async function POST(request: Request) {
               : owned.entry.approvedAt,
         })
         .where(eq(entries.id, entryId));
+
+      // Append-only operational audit log for financial & tournament integrity
+      if (status !== owned.entry.status || paymentStatus !== owned.entry.paymentStatus) {
+        await db.insert(auditLog).values({
+          id: crypto.randomUUID(),
+          tournamentId: owned.tournament.id,
+          actorEmail: user.email,
+          action: "ENTRY_UPDATED",
+          entityType: "entry",
+          entityId: entryId,
+          detail: JSON.stringify({
+            previousStatus: owned.entry.status,
+            newStatus: status,
+            previousPaymentStatus: owned.entry.paymentStatus,
+            newPaymentStatus: paymentStatus,
+            groupName,
+          }),
+        });
+      }
+
       return Response.json({ ok: true });
     }
 
@@ -593,6 +703,20 @@ export async function POST(request: Request) {
       return Response.json({ ok: true });
     }
 
+    if (payload.action === "syncMatchSubstitution") {
+      const entryId = clean(payload.entryId, 50);
+      const subOutId = clean(payload.subOutId, 50);
+      const subInId = clean(payload.subInId, 50);
+      if (entryId && subOutId && subInId) {
+        await db.update(squadMembers).set({ isStarting: false })
+          .where(and(eq(squadMembers.entryId, entryId), eq(squadMembers.playerId, subOutId)));
+        await db.update(squadMembers).set({ isStarting: true })
+          .where(and(eq(squadMembers.entryId, entryId), eq(squadMembers.playerId, subInId)));
+        return Response.json({ ok: true });
+      }
+      return Response.json({ error: "Invalid substitution payload" }, { status: 400 });
+    }
+
     if (payload.action === "updateSquad") {
       const entryId = clean(payload.entryId, 50);
       const squadList = Array.isArray(payload.squad) ? payload.squad : [];
@@ -610,9 +734,26 @@ export async function POST(request: Request) {
       if (squadList.length > entryContext.division.maxSquadSize) return Response.json({ error: "Squad exceeds the division maximum." }, { status: 400 });
       const playerIds = squadList.map((item) => clean((item as Record<string, unknown>).playerId, 50));
       if (new Set(playerIds).size !== playerIds.length || playerIds.some((id) => !id)) return Response.json({ error: "Every squad player must be selected once." }, { status: 400 });
-      const ownedPlayers = playerIds.length ? await db.select({ id: players.id }).from(players)
+      const ownedPlayers = playerIds.length ? await db.select().from(players)
         .where(and(inArray(players.id, playerIds), eq(players.clubId, entryContext.clubId))) : [];
       if (ownedPlayers.length !== playerIds.length) return Response.json({ error: "A selected player does not exist." }, { status: 400 });
+
+      // AIFF youth squad & lineup invariant verification
+      if (squadList.length > 0) {
+        const squadValidation = validateSquadEligibility(
+          entryContext.division,
+          squadList.map((item: any) => ({
+            playerId: clean(item.playerId, 50),
+            isStarting: Boolean(item.isStarting),
+            jerseyNumberOverride: item.jerseyNumber ? numberValue(item.jerseyNumber) : null,
+            positionOverride: clean(item.position, 10) || null,
+          })),
+          ownedPlayers
+        );
+        if (!squadValidation.valid) {
+          return Response.json({ error: squadValidation.errors[0], errors: squadValidation.errors }, { status: 400 });
+        }
+      }
 
       // Delete existing squad assignments for this entry
       await db.delete(squadMembers).where(eq(squadMembers.entryId, entryId));
@@ -671,11 +812,17 @@ export async function POST(request: Request) {
       const pairings: Array<{ round: number; roundName: string; stage: string; bracketRound?: string; bracketIndex?: number; home: string; away: string }> = [];
 
       if (mode === "knockout") {
-        const seeded = [...approvedEntries.map(e => e.id)];
-        const matches = Math.floor(seeded.length / 2);
-        const roundName = matches === 1 ? "Final" : matches === 2 ? "Semi-Finals" : matches === 4 ? "Quarter-Finals" : `Round of ${matches * 2}`;
-        for (let index = 0; index < matches; index += 1) {
-          pairings.push({ round: 1, roundName: `${roundName}${matches > 1 ? ` ${index + 1}` : ""}`, stage: "knockout", bracketRound: matches === 1 ? "final" : undefined, bracketIndex: index + 1, home: seeded[index], away: seeded[seeded.length - 1 - index] });
+        const blueprints = buildKnockoutTree(approvedEntries.map(e => e.id));
+        for (const bp of blueprints) {
+          pairings.push({
+            round: bp.roundNumber,
+            roundName: bp.roundName,
+            stage: "knockout",
+            bracketRound: bp.bracketRound,
+            bracketIndex: bp.bracketMatchIndex,
+            home: bp.homeEntryId,
+            away: bp.awayEntryId,
+          });
         }
       } else if (mode === "group_knockout") {
         // Group matches for Group A and Group B
@@ -728,7 +875,9 @@ export async function POST(request: Request) {
       }
 
       const requestedRound = numberValue(payload.roundNumber, 0);
-      const selectedPairings = requestedRound > 0 ? pairings.filter((pair) => pair.round === requestedRound) : pairings.filter((pair) => pair.round === 1);
+      const selectedPairings = requestedRound > 0
+        ? pairings.filter((pair) => pair.round === requestedRound)
+        : pairings;
       if (!selectedPairings.length) return Response.json({ error: "That round has no fixtures to generate." }, { status: 400 });
 
       const base = new Date(`${startDate}T${startTime}:00+05:30`);
@@ -757,8 +906,9 @@ export async function POST(request: Request) {
       });
 
       // A published/live round is immutable. Draft fixture generation can be safely replaced.
+      const targetRoundNumbers = Array.from(new Set(fixtureRows.map((f) => f.roundNumber)));
       const existingFixtures = await db.select({ id: fixtures.id, status: fixtures.status }).from(fixtures)
-        .where(and(eq(fixtures.divisionId, divisionId), eq(fixtures.roundNumber, fixtureRows[0].roundNumber)));
+        .where(and(eq(fixtures.divisionId, divisionId), inArray(fixtures.roundNumber, targetRoundNumbers)));
       if (existingFixtures.some((fixture) => fixture.status === "in_progress" || fixture.status === "completed")) {
         return Response.json({ error: "A played round cannot be regenerated." }, { status: 409 });
       }
@@ -779,10 +929,10 @@ export async function POST(request: Request) {
       const homeScorePenalties = numberValue(payload.homeScorePenalties, 0);
       const awayScorePenalties = numberValue(payload.awayScorePenalties, 0);
 
-      const official = await fixtureForOfficial(fixtureId, user.email);
+      const official = await fixtureForOfficial(fixtureId, user.email, user.role);
       if (!official) return Response.json({ error: "Fixture not found" }, { status: 404 });
       const currentFix = official.fixture;
-      if (currentFix.stage !== "knockout" || currentFix.status === "completed") return Response.json({ error: "This knockout result cannot be advanced." }, { status: 409 });
+      if (currentFix.stage !== "knockout") return Response.json({ error: "This fixture is not a knockout match." }, { status: 409 });
       if (![currentFix.homeEntryId, currentFix.awayEntryId].includes(winningEntryId) || ![currentFix.homeEntryId, currentFix.awayEntryId].includes(losingEntryId) || winningEntryId === losingEntryId) {
         return Response.json({ error: "Winner and loser must be the two teams in this fixture." }, { status: 400 });
       }
@@ -796,7 +946,7 @@ export async function POST(request: Request) {
         awayScorePenalties,
       }).where(eq(fixtures.id, fixtureId));
 
-      // Advance into next round if this was a semi-final or quarter-final
+      // Advance into next round
       if (currentFix.bracketRound === "semi_final") {
         const finalFix = await db.select().from(fixtures).where(
           and(eq(fixtures.divisionId, currentFix.divisionId), eq(fixtures.bracketRound, "final"))
@@ -818,6 +968,32 @@ export async function POST(request: Request) {
             isMatch1 ? { homeEntryId: losingEntryId } : { awayEntryId: losingEntryId }
           ).where(eq(fixtures.id, bronzeFix[0].id));
         }
+      } else if (currentFix.bracketRound) {
+        // Handle progression across all knockout rounds: QF -> Semi, R16 -> QF, R32 -> R16
+        const nextRoundMap: Record<string, string> = {
+          quarter_final: "semi_final",
+          round_of_16: "quarter_final",
+          round_of_32: "round_of_16",
+          round_of_64: "round_of_32",
+        };
+        const nextRound = nextRoundMap[currentFix.bracketRound];
+        if (nextRound && currentFix.bracketMatchIndex) {
+          const targetMatchIndex = Math.ceil(currentFix.bracketMatchIndex / 2);
+          const isHomeSlot = currentFix.bracketMatchIndex % 2 === 1;
+          const [parentFix] = await db.select().from(fixtures).where(
+            and(
+              eq(fixtures.divisionId, currentFix.divisionId),
+              eq(fixtures.bracketRound, nextRound),
+              eq(fixtures.bracketMatchIndex, targetMatchIndex)
+            )
+          ).limit(1);
+
+          if (parentFix) {
+            await db.update(fixtures).set(
+              isHomeSlot ? { homeEntryId: winningEntryId } : { awayEntryId: winningEntryId }
+            ).where(eq(fixtures.id, parentFix.id));
+          }
+        }
       }
 
       return Response.json({ ok: true });
@@ -828,7 +1004,7 @@ export async function POST(request: Request) {
       const entryId = clean(payload.entryId, 50);
       const playerId = clean(payload.playerId, 50);
       const scored = Boolean(payload.scored);
-      const official = await fixtureForOfficial(fixtureId, user.email);
+      const official = await fixtureForOfficial(fixtureId, user.email, user.role);
       if (!official || official.fixture.stage !== "knockout" || official.fixture.period !== "penalties") return Response.json({ error: "This fixture is not in a shootout." }, { status: 409 });
       if (![official.fixture.homeEntryId, official.fixture.awayEntryId].includes(entryId) || !(await playerCanBeUsed(entryId, playerId))) return Response.json({ error: "Select an eligible shootout taker." }, { status: 400 });
       const kicks = await db.select().from(shootoutKicks).where(eq(shootoutKicks.fixtureId, fixtureId)).orderBy(asc(shootoutKicks.sequence));
@@ -838,11 +1014,13 @@ export async function POST(request: Request) {
       const eligible = await db.select({ playerId: squadMembers.playerId }).from(squadMembers).where(eq(squadMembers.entryId, entryId));
       if (used.includes(playerId) && used.length < eligible.length) return Response.json({ error: "Each eligible player must take a kick before a repeat taker." }, { status: 409 });
       const kick = { id: crypto.randomUUID(), fixtureId, entryId, playerId, sequence: kicks.length + 1, scored, recordedBy: user.email };
-      await db.insert(shootoutKicks).values(kick);
       const all = [...kicks, kick];
       const home = all.filter((item) => item.entryId === official.fixture.homeEntryId && item.scored).length;
       const away = all.filter((item) => item.entryId === official.fixture.awayEntryId && item.scored).length;
-      await db.update(fixtures).set({ homeScorePenalties: home, awayScorePenalties: away }).where(eq(fixtures.id, fixtureId));
+      await db.batch([
+        db.insert(shootoutKicks).values(kick),
+        db.update(fixtures).set({ homeScorePenalties: home, awayScorePenalties: away }).where(eq(fixtures.id, fixtureId)),
+      ]);
       return Response.json({ kick, homeScorePenalties: home, awayScorePenalties: away }, { status: 201 });
     }
 
@@ -852,11 +1030,11 @@ export async function POST(request: Request) {
       const fixtureId = clean(payload.fixtureId, 50);
       const status = clean(payload.status, 20);
       const period = clean(payload.period, 20);
-      const matchClockMinute = numberValue(payload.matchClockMinute, 0);
+      const matchClockMinute = payload.matchClockMinute !== undefined ? numberValue(payload.matchClockMinute, 0) : undefined;
       const homeScore = payload.homeScore !== undefined ? numberValue(payload.homeScore) : undefined;
       const awayScore = payload.awayScore !== undefined ? numberValue(payload.awayScore) : undefined;
 
-      const official = await fixtureForOfficial(fixtureId, user.email);
+      const official = await fixtureForOfficial(fixtureId, user.email, user.role);
       if (!official) return Response.json({ error: "Fixture not found" }, { status: 404 });
       const fixture = official.fixture;
       const validPeriods = ["scheduled", "first_half", "half_time", "second_half", "extra_time", "penalties", "completed"];
@@ -881,14 +1059,14 @@ export async function POST(request: Request) {
           return Response.json({ error: `Each team needs at least ${requiredStarters} named starters before kick-off.` }, { status: 409 });
         }
       }
-      if (matchClockMinute > maxMinuteForPeriod(period || fixture.period, Math.ceil(official.division.matchDurationMinutes / 2))) {
+      if (matchClockMinute !== undefined && matchClockMinute > maxMinuteForPeriod(period || fixture.period, Math.ceil(official.division.matchDurationMinutes / 2))) {
         return Response.json({ error: "Clock exceeds the configured match duration for this period." }, { status: 400 });
       }
       if (fixture.status === "completed" && status !== "completed") return Response.json({ error: "Completed matches are locked." }, { status: 409 });
       if (status === "completed" && !["second_half", "extra_time", "penalties", "completed"].includes(period || fixture.period)) {
         return Response.json({ error: "A match cannot finish before the second half." }, { status: 400 });
       }
-      if (status === "completed" && (period || fixture.period) === "second_half" && matchClockMinute < official.division.matchDurationMinutes) {
+      if (status === "completed" && (period || fixture.period) === "second_half" && (matchClockMinute || fixture.matchClockMinute) < official.division.matchDurationMinutes) {
         return Response.json({ error: "The configured match duration has not elapsed." }, { status: 400 });
       }
       if (homeScore !== undefined || awayScore !== undefined) {
@@ -900,8 +1078,143 @@ export async function POST(request: Request) {
       if (period) updateData.period = period;
       if (matchClockMinute !== undefined) updateData.matchClockMinute = Math.max(0, matchClockMinute);
 
+      // Autonomous Pitch Clock lifecycle transitions
+      if (payload.clockRunning !== undefined) {
+        updateData.clockRunning = payload.clockRunning ? 1 : 0;
+      }
+      if (payload.clockStartedAt !== undefined) {
+        updateData.clockStartedAt = payload.clockStartedAt ? clean(payload.clockStartedAt, 50) : null;
+      }
+      if (payload.clockElapsedSeconds !== undefined) {
+        updateData.clockElapsedSeconds = Math.max(0, numberValue(payload.clockElapsedSeconds, 0));
+      }
+      if (payload.stoppageMinutes !== undefined) {
+        updateData.stoppageMinutes = Math.max(0, Math.min(30, numberValue(payload.stoppageMinutes, 0)));
+      }
+      if (payload.clockPauseReason !== undefined) {
+        updateData.clockPauseReason = payload.clockPauseReason ? clean(payload.clockPauseReason, 30) : null;
+      }
+
+      // Period change auto-conversions if clock parameters were not explicitly overridden
+      const targetPeriod = period || fixture.period;
+      const halfSeconds = Math.ceil(official.division.matchDurationMinutes / 2) * 60;
+      if (period === "first_half" && fixture.period === "scheduled" && payload.clockRunning === undefined) {
+        updateData.clockRunning = 1;
+        updateData.clockStartedAt = new Date().toISOString();
+        updateData.clockElapsedSeconds = 0;
+        updateData.stoppageMinutes = 0;
+        updateData.clockPauseReason = null;
+      } else if (period === "half_time" && payload.clockRunning === undefined) {
+        updateData.clockRunning = 0;
+        updateData.clockStartedAt = null;
+        updateData.clockElapsedSeconds = halfSeconds;
+        updateData.stoppageMinutes = 0;
+        updateData.clockPauseReason = null;
+        updateData.matchClockMinute = Math.ceil(official.division.matchDurationMinutes / 2);
+      } else if (period === "second_half" && fixture.period === "half_time" && payload.clockRunning === undefined) {
+        updateData.clockRunning = 1;
+        updateData.clockStartedAt = new Date().toISOString();
+        updateData.clockElapsedSeconds = halfSeconds;
+        updateData.stoppageMinutes = 0;
+        updateData.clockPauseReason = null;
+        updateData.matchClockMinute = Math.ceil(official.division.matchDurationMinutes / 2);
+      } else if (status === "completed" && payload.clockRunning === undefined) {
+        updateData.clockRunning = 0;
+        updateData.clockStartedAt = null;
+        updateData.clockPauseReason = null;
+      }
+
       await db.update(fixtures).set(updateData).where(eq(fixtures.id, fixtureId));
       return Response.json({ ok: true });
+    }
+
+    if (payload.action === "pauseMatchClock") {
+      const fixtureId = clean(payload.fixtureId, 50);
+      const reason = clean(payload.reason, 30) || "manual";
+      const official = await fixtureForOfficial(fixtureId, user.email, user.role);
+      if (!official) return Response.json({ error: "Fixture not found" }, { status: 404 });
+      const fixture = official.fixture;
+      if (fixture.status !== "in_progress") return Response.json({ error: "Cannot pause a match that is not live." }, { status: 409 });
+
+      let currentElapsed = fixture.clockElapsedSeconds || 0;
+      if (typeof payload.clientElapsedSeconds === "number" && payload.clientElapsedSeconds >= 0) {
+        // Deterministic client elapsed seconds captured at moment of referee whistle (resilient to offline replay drift)
+        const maxAllowed = (official.division.matchDurationMinutes + 45) * 60;
+        currentElapsed = Math.min(Math.round(payload.clientElapsedSeconds), maxAllowed);
+      } else if (fixture.clockRunning && fixture.clockStartedAt) {
+        const startMs = Date.parse(fixture.clockStartedAt);
+        if (!Number.isNaN(startMs)) {
+          const delta = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+          currentElapsed += delta;
+        }
+      }
+      const minute = Math.floor(currentElapsed / 60);
+
+      await db.update(fixtures).set({
+        clockRunning: 0,
+        clockStartedAt: null,
+        clockElapsedSeconds: currentElapsed,
+        clockPauseReason: reason,
+        matchClockMinute: minute,
+      }).where(eq(fixtures.id, fixtureId));
+
+      return Response.json({
+        ok: true,
+        clockRunning: false,
+        clockElapsedSeconds: currentElapsed,
+        clockPauseReason: reason,
+        matchClockMinute: minute,
+      });
+    }
+
+    if (payload.action === "resumeMatchClock") {
+      const fixtureId = clean(payload.fixtureId, 50);
+      const official = await fixtureForOfficial(fixtureId, user.email, user.role);
+      if (!official) return Response.json({ error: "Fixture not found" }, { status: 404 });
+      const fixture = official.fixture;
+      if (fixture.status !== "in_progress" || fixture.period === "completed" || fixture.period === "half_time") {
+        return Response.json({ error: "Match cannot be resumed in this state." }, { status: 409 });
+      }
+
+      if (fixture.clockRunning && fixture.clockStartedAt) {
+        return Response.json({
+          ok: true,
+          clockRunning: true,
+          clockStartedAt: fixture.clockStartedAt,
+          clockPauseReason: null,
+          idempotent: true,
+        });
+      }
+
+      const nowIso = new Date().toISOString();
+      await db.update(fixtures).set({
+        clockRunning: 1,
+        clockStartedAt: nowIso,
+        clockPauseReason: null,
+      }).where(eq(fixtures.id, fixtureId));
+
+      return Response.json({
+        ok: true,
+        clockRunning: true,
+        clockStartedAt: nowIso,
+        clockPauseReason: null,
+      });
+    }
+
+    if (payload.action === "setStoppageTime") {
+      const fixtureId = clean(payload.fixtureId, 50);
+      const stoppageMinutes = Math.max(0, Math.min(30, numberValue(payload.stoppageMinutes, 0)));
+      const official = await fixtureForOfficial(fixtureId, user.email, user.role);
+      if (!official) return Response.json({ error: "Fixture not found" }, { status: 404 });
+
+      await db.update(fixtures).set({
+        stoppageMinutes,
+      }).where(eq(fixtures.id, fixtureId));
+
+      return Response.json({
+        ok: true,
+        stoppageMinutes,
+      });
     }
 
     if (payload.action === "recordDetailedMatchEvent") {
@@ -913,13 +1226,24 @@ export async function POST(request: Request) {
       const assistPlayerName = clean(payload.assistPlayerName, 100);
       const assistPlayerId = clean(payload.assistPlayerId, 50) || null;
       const relatedPlayerName = clean(payload.relatedPlayerName, 100);
-      const matchMinute = Math.max(0, Math.min(200, numberValue(payload.matchMinute, 0)));
       const matchPeriod = clean(payload.matchPeriod, 20) || "first_half";
       const cardReason = clean(payload.cardReason, 100);
-
-      const official = await fixtureForOfficial(fixtureId, user.email);
+      const official = await fixtureForOfficial(fixtureId, user.email, user.role);
       if (!official) return Response.json({ error: "Fixture not found" }, { status: 404 });
       const fixture = official.fixture;
+
+      let matchMinute = numberValue(payload.matchMinute, 0);
+      if (!matchMinute && fixture.status === "in_progress") {
+        let elapsed = fixture.clockElapsedSeconds || 0;
+        if (fixture.clockRunning && fixture.clockStartedAt) {
+          const startMs = Date.parse(fixture.clockStartedAt);
+          if (!Number.isNaN(startMs)) {
+            elapsed += Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+          }
+        }
+        matchMinute = Math.max(1, Math.floor(elapsed / 60) + 1);
+      }
+      matchMinute = Math.max(0, Math.min(200, matchMinute));
       const allowedTypes = ["goal", "penalty_goal", "own_goal", "yellow_card", "red_card", "substitution", "penalty_miss"];
       if (!allowedTypes.includes(type) || ![fixture.homeEntryId, fixture.awayEntryId].includes(entryId)) return Response.json({ error: "Invalid match event." }, { status: 400 });
       if (fixture.status !== "in_progress") return Response.json({ error: "Match events can only be recorded for a live match." }, { status: 409 });
@@ -943,9 +1267,42 @@ export async function POST(request: Request) {
         if (!playerId || !incomingPlayerId || playerId === incomingPlayerId || !(await playerIsOnField(fixtureId, entryId, playerId)) || !(await playerCanBeUsed(entryId, incomingPlayerId)) || await playerIsOnField(fixtureId, entryId, incomingPlayerId)) {
           return Response.json({ error: "A substitution needs one active player out and one eligible bench player in." }, { status: 400 });
         }
+
+        const existingSubs = await db
+          .select({
+            id: matchEvents.id,
+            entryId: matchEvents.entryId,
+            matchMinute: matchEvents.matchMinute,
+            matchPeriod: matchEvents.matchPeriod,
+            type: matchEvents.type,
+          })
+          .from(matchEvents)
+          .where(and(eq(matchEvents.fixtureId, fixtureId), eq(matchEvents.type, "substitution")));
+
+        const subValidation = validateSubstitutionAttempt(
+          entryId,
+          existingSubs,
+          matchMinute,
+          matchPeriod,
+          fixture.period === "extra_time"
+        );
+
+        if (!subValidation.allowed) {
+          return Response.json({ error: subValidation.reason || "Substitution not permitted under IFAB Law 3." }, { status: 400 });
+        }
       }
 
-      const eventId = crypto.randomUUID();
+      const eventId = clean(payload.eventId, 50) || crypto.randomUUID();
+      const [existingEvent] = await db
+        .select()
+        .from(matchEvents)
+        .where(eq(matchEvents.id, eventId))
+        .limit(1);
+
+      if (existingEvent) {
+        return Response.json({ event: existingEvent, idempotent: true }, { status: 200 });
+      }
+
       const event = {
         id: eventId,
         fixtureId,
@@ -974,7 +1331,7 @@ export async function POST(request: Request) {
       const [ev] = await db.select().from(matchEvents).where(eq(matchEvents.id, eventId)).limit(1);
       if (!ev) return Response.json({ error: "Event not found" }, { status: 404 });
 
-      if (!(await fixtureForOfficial(ev.fixtureId, user.email))) return Response.json({ error: "Event not found" }, { status: 404 });
+      if (!(await fixtureForOfficial(ev.fixtureId, user.email, user.role))) return Response.json({ error: "Event not found" }, { status: 404 });
       await db.delete(matchEvents).where(eq(matchEvents.id, eventId));
       await recalculateScore(ev.fixtureId);
 
@@ -986,7 +1343,7 @@ export async function POST(request: Request) {
       const potmPlayerId = clean(payload.potmPlayerId, 50) || null;
       const potmPlayerName = clean(payload.potmPlayerName, 100);
 
-      const official = await fixtureForOfficial(fixtureId, user.email);
+      const official = await fixtureForOfficial(fixtureId, user.email, user.role);
       if (!official) return Response.json({ error: "Fixture not found" }, { status: 404 });
       if (potmPlayerId && !(await playerCanBeUsed(official.fixture.homeEntryId, potmPlayerId)) && !(await playerCanBeUsed(official.fixture.awayEntryId, potmPlayerId))) {
         return Response.json({ error: "Player of the Match must be registered for this fixture." }, { status: 400 });

@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 
 const dbDir = path.resolve(".wrangler/state/v3/d1/miniflare-D1DatabaseObject");
 if (!fs.existsSync(dbDir)) {
@@ -19,15 +20,17 @@ for (const file of files) {
   console.log("Applying schema to:", dbPath);
   const db = new DatabaseSync(dbPath);
 
-  // Apply migrations
-  const m1 = fs.readFileSync(path.resolve("drizzle/0000_fair_grim_reaper.sql"), "utf8");
-  const m2 = fs.readFileSync(path.resolve("drizzle/0001_tearful_black_cat.sql"), "utf8");
-  const m3 = fs.existsSync(path.resolve("drizzle/0002_rich_squads_and_matchday.sql"))
-    ? fs.readFileSync(path.resolve("drizzle/0002_rich_squads_and_matchday.sql"), "utf8")
-    : "";
+  // Apply all migrations dynamically in sequence
+  const drizzleDir = path.resolve("drizzle");
+  const migrationFiles = fs.readdirSync(drizzleDir)
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
 
-  const statements = (m1 + "\n--> statement-breakpoint\n" + m2 + "\n--> statement-breakpoint\n" + m3)
-    .split("--> statement-breakpoint")
+  const statements = migrationFiles
+    .flatMap((file) => {
+      const content = fs.readFileSync(path.join(drizzleDir, file), "utf8");
+      return content.split("--> statement-breakpoint");
+    })
     .map((s) => s.trim())
     .filter(Boolean);
 
@@ -41,6 +44,7 @@ for (const file of files) {
 
   // Ensure all columns exist in case table was created previously without new columns
   const alterStatements = [
+    "ALTER TABLE users ADD COLUMN password_hash text DEFAULT '' NOT NULL",
     "ALTER TABLE divisions ADD COLUMN groups_count integer DEFAULT 2 NOT NULL",
     "ALTER TABLE divisions ADD COLUMN teams_advancing_per_group integer DEFAULT 2 NOT NULL",
     "ALTER TABLE entries ADD COLUMN group_name text DEFAULT 'Group A' NOT NULL",
@@ -65,6 +69,28 @@ for (const file of files) {
   ];
   for (const sql of alterStatements) {
     try { db.exec(sql); } catch {}
+  }
+
+  // Pre-seed or self-heal password_hash for testing personas (Grassroots@2026)
+  const salt = "4b8f3a9e1d2c3b4a5e6f7a8b9c0d1e2f";
+  const masterKey = crypto.pbkdf2Sync("Grassroots@2026", Buffer.from(salt, "hex"), 100000, 32, "sha256").toString("hex");
+  const masterHash = `pbkdf2$100000$${salt}$${masterKey}`;
+  
+  const testPersonas = [
+    { email: "organizer@myfootball.in", name: "Vikramaditya Singhania", role: "organizer" },
+    { email: "coach@myfootball.in", name: "Coach Subrata Paul", role: "coach" },
+    { email: "referee@myfootball.in", name: "Michael Murmu (AIFF)", role: "referee" },
+    { email: "fan@myfootball.in", name: "Aarav Sharma", role: "fan" },
+    { email: "demo@myfootball.in", name: "Demo Organizer", role: "organizer" },
+  ];
+  for (const p of testPersonas) {
+    try {
+      db.prepare(`
+        INSERT INTO users (email, full_name, role, preferred_state, preferred_city, password_hash, created_at, updated_at)
+        VALUES (?, ?, ?, 'Maharashtra', 'Mumbai', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(email) DO UPDATE SET password_hash = excluded.password_hash WHERE password_hash = '' OR password_hash IS NULL
+      `).run(p.email, p.name, p.role, masterHash);
+    } catch {}
   }
 
   // Ensure players and squad_members tables exist
@@ -93,6 +119,22 @@ for (const file of files) {
         registered_at text DEFAULT CURRENT_TIMESTAMP NOT NULL
       );
     `);
+
+    try {
+      db.exec(`ALTER TABLE fixtures ADD COLUMN clock_started_at text;`);
+    } catch {}
+    try {
+      db.exec(`ALTER TABLE fixtures ADD COLUMN clock_running integer DEFAULT 0 NOT NULL;`);
+    } catch {}
+    try {
+      db.exec(`ALTER TABLE fixtures ADD COLUMN clock_elapsed_seconds integer DEFAULT 0 NOT NULL;`);
+    } catch {}
+    try {
+      db.exec(`ALTER TABLE fixtures ADD COLUMN stoppage_minutes integer DEFAULT 0 NOT NULL;`);
+    } catch {}
+    try {
+      db.exec(`ALTER TABLE fixtures ADD COLUMN clock_pause_reason text;`);
+    } catch {}
   } catch {}
 
   const countStmt = db.prepare("SELECT COUNT(*) as count FROM players");
@@ -105,11 +147,20 @@ for (const file of files) {
     console.log("Seeding rich Indian football tournament ecosystem (players, squads, brackets)...");
     const now = new Date().toISOString();
 
-    // 1. Seed user
-    db.prepare(`
-      INSERT OR IGNORE INTO users (email, full_name, role, preferred_state, preferred_city, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run("demo@myfootball.in", "Demo Organizer", "organizer", "Maharashtra", "Mumbai", now, now);
+    // 1. Seed users (4 testing personas + legacy demo)
+    const seedUsers = [
+      { email: "organizer@myfootball.in", name: "Vikramaditya Singhania", role: "organizer" },
+      { email: "coach@myfootball.in", name: "Coach Subrata Paul", role: "coach" },
+      { email: "referee@myfootball.in", name: "Michael Murmu (AIFF)", role: "referee" },
+      { email: "fan@myfootball.in", name: "Aarav Sharma", role: "fan" },
+      { email: "demo@myfootball.in", name: "Demo Organizer", role: "organizer" },
+    ];
+    for (const u of seedUsers) {
+      db.prepare(`
+        INSERT OR IGNORE INTO users (email, full_name, role, preferred_state, preferred_city, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(u.email, u.name, u.role, "Maharashtra", "Mumbai", now, now);
+    }
 
     // 2. Seed primary tournament
     const tourneyId = "tourney-mumbai-super-cup-2026";
@@ -120,7 +171,7 @@ for (const file of files) {
         status, contact_name, contact_phone, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      tourneyId, "demo@myfootball.in", "Mumbai Super Cup 2026", "Western India Football Association",
+      tourneyId, "organizer@myfootball.in", "Mumbai Super Cup 2026", "Western India Football Association",
       "Mumbai", "Cooperage Football Ground", "Madame Cama Road, Colaba", "Colaba", "Maharashtra",
       "400001", "18.924800", "72.828600", "2026-09-01", 5, "live", "Sunil Fernandes", "+91 98200 12345",
       now, now
@@ -134,7 +185,7 @@ for (const file of files) {
         fee_paise, fee_basis, require_players, require_documents, win_points, draw_points, loss_points, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      divU17, tourneyId, "Under-17 Premier Division", "group_knockout", 18, 8, 2, 2,
+      divU17, tourneyId, "Under-17 Premier Division", "group_knockout", 18, 16, 2, 2,
       350000, "per_team", 1, 0, 3, 1, 0, now
     );
 
@@ -179,7 +230,8 @@ for (const file of files) {
     ];
 
     for (const c of clubsData) {
-      insertClub.run(c.id, "demo@myfootball.in", c.name, "academy", c.city, "Head Coach", "+91 98000 00000", now);
+      const ownerEmail = c.id === "club-rfyc" ? "coach@myfootball.in" : "demo@myfootball.in";
+      insertClub.run(c.id, ownerEmail, c.name, "academy", c.city, "Head Coach", "+91 98000 00000", now);
       insertTeam.run(c.teamId, c.id, c.teamName, now);
       const entryId = `entry-${c.teamId}`;
       insertEntry.run(entryId, divU17, c.teamId, "approved", "paid", 350000, c.seed, c.group, "Confirmed entry", now, now);

@@ -5,6 +5,7 @@ export type ChatGPTUser = {
   displayName: string;
   email: string;
   fullName: string | null;
+  role?: string;
 };
 
 const USER_EMAIL_HEADER = "oai-authenticated-user-email";
@@ -12,9 +13,12 @@ const USER_FULL_NAME_HEADER = "oai-authenticated-user-full-name";
 const USER_FULL_NAME_ENCODING_HEADER =
   "oai-authenticated-user-full-name-encoding";
 const PERCENT_ENCODED_UTF8 = "percent-encoded-utf-8";
-const SIGN_IN_PATH = "/signin-with-chatgpt";
+const SIGN_IN_PATH = "/login";
 const SIGN_OUT_PATH = "/signout-with-chatgpt";
 const CALLBACK_PATH = "/callback";
+
+import { signSession, verifySession } from "./lib/auth-crypto";
+export { signSession, verifySession };
 
 export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
   const requestHeaders = await headers();
@@ -31,6 +35,7 @@ export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
       displayName: fullName ?? email,
       email,
       fullName,
+      role: "fan",
     };
   }
 
@@ -38,26 +43,24 @@ export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
     const cookieStore = await cookies();
     const userCookie = cookieStore.get("myfootball_user")?.value;
     if (userCookie) {
-      const parsed = JSON.parse(decodeURIComponent(userCookie));
-      if (parsed && parsed.email) {
+      // Strictly verify signed HMAC session
+      const verified = await verifySession<{
+        email: string;
+        fullName?: string | null;
+        displayName?: string;
+        role?: string;
+      }>(userCookie);
+      if (verified && verified.email) {
         return {
-          displayName: parsed.displayName || parsed.fullName || parsed.email,
-          email: parsed.email,
-          fullName: parsed.fullName || null,
+          displayName: verified.displayName || verified.fullName || verified.email,
+          email: verified.email,
+          fullName: verified.fullName || null,
+          role: verified.role || "fan",
         };
       }
     }
   } catch {
     // Ignore cookie resolution error
-  }
-
-  // In local development environment, default to demo user for seamless zero-friction testing
-  if (process.env.NODE_ENV !== "production") {
-    return {
-      displayName: "Demo User",
-      email: "demo@myfootball.in",
-      fullName: "Demo User",
-    };
   }
 
   return null;

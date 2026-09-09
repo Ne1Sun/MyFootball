@@ -1,8 +1,9 @@
 "use client";
 
 import React from "react";
-import { CircleDot, Clock, Shield, Sparkles, Trophy } from "lucide-react";
+import { CircleDot, Clock, PauseCircle, Shield, Sparkles, Trophy } from "lucide-react";
 import { getTeamTricode, SafeText } from "../ui/SafeText";
+import { usePitchClock, PAUSE_REASONS, type PauseReasonKey } from "../../lib/pitch-clock";
 
 export interface BroadcastScorebugProps {
   homeTeamName: string;
@@ -18,6 +19,11 @@ export interface BroadcastScorebugProps {
   tournamentName?: string;
   stateBadge?: string;
   className?: string;
+  clockStartedAt?: string | null;
+  clockRunning?: boolean;
+  clockElapsedSeconds?: number;
+  clockPauseReason?: string | null;
+  matchDurationMinutes?: number;
 }
 
 export function BroadcastScorebug({
@@ -34,11 +40,32 @@ export function BroadcastScorebug({
   tournamentName,
   stateBadge = "🇮🇳",
   className = "",
+  clockStartedAt,
+  clockRunning,
+  clockElapsedSeconds,
+  clockPauseReason,
+  matchDurationMinutes = 50,
 }: BroadcastScorebugProps) {
   const isLive = status === "in_progress";
   const isCompleted = status === "completed";
   const homeTri = getTeamTricode(homeTeamName);
   const awayTri = getTeamTricode(awayTeamName);
+
+  const pitchClock = usePitchClock(
+    clockRunning !== undefined
+      ? {
+          status,
+          period: periodText.toLowerCase().includes("2nd") || periodText.toLowerCase().includes("second") ? "second_half" : "first_half",
+          matchClockMinute: matchMinute,
+          clockStartedAt,
+          clockRunning,
+          clockElapsedSeconds,
+          stoppageMinutes: stoppageTime,
+          clockPauseReason,
+        }
+      : null,
+    Math.ceil(matchDurationMinutes / 2)
+  );
 
   return (
     <div
@@ -100,23 +127,36 @@ export function BroadcastScorebug({
           )}
 
           {/* Match Clock / Period Indicator */}
-          <div className="flex items-center gap-1.5 text-[11px] font-mono font-bold text-slate-300 mt-1">
-            {isLive ? (
-              <>
-                <Clock size={11} className="text-amber-400 animate-spin" />
-                <span className="text-emerald-400">
-                  {matchMinute}&apos; {stoppageTime > 0 && <strong className="text-amber-400">+{stoppageTime}</strong>}
+          <div className="flex flex-col items-center gap-0.5 mt-1">
+            <div className="flex items-center gap-1.5 text-[11px] font-mono font-bold text-slate-300">
+              {isLive ? (
+                <>
+                  <Clock size={11} className={`text-amber-400 ${pitchClock.isRunning ? "animate-spin" : ""}`} />
+                  <span className="text-emerald-400">
+                    {clockRunning !== undefined ? pitchClock.formattedClock : `${matchMinute}'`}
+                  </span>
+                  {clockRunning === undefined && stoppageTime > 0 && (
+                    <strong className="text-amber-400">+{stoppageTime}</strong>
+                  )}
+                  <span className="text-slate-500">•</span>
+                  <span className="text-slate-400">{periodText}</span>
+                </>
+              ) : isCompleted ? (
+                <span className="text-slate-400 font-sans uppercase text-[10px] font-extrabold tracking-wider">
+                  Official Result
                 </span>
-                <span className="text-slate-500">•</span>
-                <span className="text-slate-400">{periodText}</span>
-              </>
-            ) : isCompleted ? (
-              <span className="text-slate-400 font-sans uppercase text-[10px] font-extrabold tracking-wider">
-                Official Result
-              </span>
-            ) : (
-              <span className="text-amber-400/80 font-sans uppercase text-[10px] font-bold">
-                Upcoming
+              ) : (
+                <span className="text-amber-400/80 font-sans uppercase text-[10px] font-bold">
+                  Upcoming
+                </span>
+              )}
+            </div>
+
+            {/* Pulsing Pause Badge if match play is halted */}
+            {isLive && clockRunning !== undefined && pitchClock.isPaused && (
+              <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/30 text-[9px] font-black uppercase tracking-wider animate-pulse">
+                <PauseCircle size={10} />
+                <span>{pitchClock.pauseConfig?.short || "Clock Paused"}</span>
               </span>
             )}
           </div>

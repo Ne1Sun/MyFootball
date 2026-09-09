@@ -3,6 +3,7 @@ import { getDb } from "../../db";
 import { users } from "../../db/schema";
 import { requireChatGPTUser } from "../chatgpt-auth";
 import Dashboard from "../dashboard";
+import { RoleGateCard } from "../components/auth/RoleGateCard";
 
 export const dynamic = "force-dynamic";
 
@@ -15,17 +16,18 @@ export default async function OrganizePage() {
     .where(eq(users.email, user.email))
     .limit(1);
 
-  if (!profile) {
-    const now = new Date().toISOString();
-    await db.insert(users).values({
-      email: user.email,
-      fullName: user.displayName || user.fullName || "Tournament Organizer",
-      role: "organizer",
-      preferredState: "",
-      preferredCity: "",
-      createdAt: now,
-      updatedAt: now,
-    }).onConflictDoNothing();
+  const effectiveRole = profile?.role || user.role || "fan";
+
+  // Strict RBAC Guard: Only organizers can access the director dashboard
+  if (effectiveRole !== "organizer") {
+    return (
+      <RoleGateCard
+        requiredRole="organizer"
+        currentRole={effectiveRole}
+        userEmail={user.email}
+        userName={user.displayName || "User"}
+      />
+    );
   }
 
   return <Dashboard user={user} />;

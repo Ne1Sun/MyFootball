@@ -103,6 +103,41 @@ export async function GET(
       isFollowed = Boolean(follow);
     }
 
+    let myClubs: Array<{
+      id: string;
+      name: string;
+      city: string | null;
+      organizationType: string | null;
+      contactName: string | null;
+      contactPhone: string | null;
+      teams: Array<{ id: string; name: string }>;
+    }> = [];
+
+    if (signedIn) {
+      const ownedClubs = await db
+        .select()
+        .from(clubs)
+        .where(eq(clubs.ownerEmail, signedIn.email));
+      if (ownedClubs.length > 0) {
+        const clubIds = ownedClubs.map((c) => c.id);
+        const ownedTeams = await db
+          .select()
+          .from(teams)
+          .where(inArray(teams.clubId, clubIds));
+        myClubs = ownedClubs.map((c) => ({
+          id: c.id,
+          name: c.name,
+          city: c.city,
+          organizationType: c.organizationType,
+          contactName: c.contactName,
+          contactPhone: c.contactPhone,
+          teams: ownedTeams
+            .filter((t) => t.clubId === c.id)
+            .map((t) => ({ id: t.id, name: t.name })),
+        }));
+      }
+    }
+
     return Response.json({
       tournament,
       divisions: divisionRows,
@@ -112,6 +147,7 @@ export async function GET(
       announcements: announcementRows,
       isFollowed,
       user: signedIn,
+      myClubs,
     });
   } catch (error) {
     return apiError(error);
@@ -127,6 +163,16 @@ export async function POST(
     const payload = (await request.json()) as Record<string, unknown>;
     const signedIn = await requireApiUser();
     if (!signedIn) return Response.json({ error: "Sign in to register a team." }, { status: 401 });
+    if (signedIn.role !== "coach") {
+      return Response.json(
+        {
+          error: "Only registered Academy Coaches and Team Managers can enroll squads into tournaments. Please sign out and log in with a Coach account.",
+          code: "COACH_ROLE_REQUIRED",
+          currentRole: signedIn.role,
+        },
+        { status: 403 },
+      );
+    }
     const db = getDb();
     const [tournament] = await db
       .select()
@@ -134,7 +180,7 @@ export async function POST(
       .where(
         and(
           eq(tournaments.id, id),
-          eq(tournaments.status, "registration_open"),
+          inArray(tournaments.status, ["registration_open", "live", "scheduled"]),
         ),
       )
       .limit(1);
@@ -175,12 +221,12 @@ export async function POST(
         { error: "Complete all required fields." },
         { status: 400 },
       );
+
     const [existingClub] = await db.select().from(clubs)
       .where(and(eq(clubs.ownerEmail, signedIn.email), eq(clubs.name, clubName))).limit(1);
     const clubId = existingClub?.id ?? crypto.randomUUID();
-    const teamId = crypto.randomUUID();
-    const entryId = crypto.randomUUID();
-    if (!existingClub) await db.insert(clubs).values({
+    if (!existingClub) {
+      await db.insert(clubs).values({
         id: clubId,
         ownerEmail: signedIn.email,
         name: clubName,
@@ -189,18 +235,55 @@ export async function POST(
         contactName,
         contactPhone,
       });
-    await db.batch([
-      db.insert(teams).values({ id: teamId, clubId, name: teamName }),
-      db.insert(entries).values({
-        id: entryId,
-        divisionId,
-        teamId,
-        status: "pending",
-        paymentStatus: "unpaid",
-        amountPaise: division.feePaise,
-        notes: clean(payload.notes, 500),
-      }),
-    ]);
+    }
+
+    // Safely check if team already exists under this club to avoid unique constraint collision
+    const [existingTeam] = await db
+      .select()
+      .from(teams)
+      .where(and(eq(teams.clubId, clubId), eq(teams.name, teamName)))
+      .limit(1);
+    const teamId = existingTeam ? existingTeam.id : crypto.randomUUID();
+    if (!existingTeam) {
+      await db.insert(teams).values({ id: teamId, clubId, name: teamName });
+    }
+
+    // Check if team is already registered in this division
+    const [duplicateEntry] = await db
+      .select({ id: entries.id })
+      .from(entries)
+      .where(and(eq(entries.divisionId, divisionId), eq(entries.teamId, teamId)))
+      .limit(1);
+    if (duplicateEntry) {
+      return Response.json(
+        { error: "This squad is already registered in this tournament division." },
+        { status: 409 },
+      );
+    }
+
+    // Fresh capacity check immediately prior to insert
+    const freshCount = await db
+      .select({ id: entries.id })
+      .from(entries)
+      .where(eq(entries.divisionId, divisionId));
+    if (freshCount.length >= division.maxTeams) {
+      return Response.json(
+        { error: "This division has reached its maximum team capacity." },
+        { status: 409 },
+      );
+    }
+
+    const entryId = crypto.randomUUID();
+    await db.insert(entries).values({
+      id: entryId,
+      divisionId,
+      teamId,
+      status: "pending",
+      paymentStatus: "unpaid",
+      amountPaise: division.feePaise,
+      notes: clean(payload.notes, 500),
+    });
+
     return Response.json(
       {
         entryId,

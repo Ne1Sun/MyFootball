@@ -10,8 +10,10 @@ import {
   squadMembers,
   teams,
   tournaments,
+  users,
 } from "../../db/schema";
 import { requireChatGPTUser } from "../chatgpt-auth";
+import { RoleGateCard } from "../components/auth/RoleGateCard";
 import type { Entry } from "../components/types";
 import { RefereeConsoleClient } from "./referee-console-client";
 
@@ -20,6 +22,26 @@ export const dynamic = "force-dynamic";
 export default async function RefereePage() {
   const user = await requireChatGPTUser("/referee");
   const db = getDb();
+
+  const [profile] = await db
+    .select({ role: users.role })
+    .from(users)
+    .where(eq(users.email, user.email))
+    .limit(1);
+
+  const effectiveRole = profile?.role || user.role || "fan";
+
+  // Strict RBAC Guard: Only match officials/referees can access the pitch console
+  if (effectiveRole !== "referee") {
+    return (
+      <RoleGateCard
+        requiredRole="referee"
+        currentRole={effectiveRole}
+        userEmail={user.email}
+        userName={user.displayName || user.fullName || "Referee"}
+      />
+    );
+  }
 
   const fixtureRows = await db.select().from(fixtures).orderBy(asc(fixtures.kickoffAt));
   const entryRows = await db

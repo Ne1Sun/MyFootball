@@ -21,9 +21,39 @@ import {
 import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import type { ChatGPTUser } from "../chatgpt-auth";
+import { BroadcastScorebug } from "../components/broadcast/BroadcastScorebug";
 import { AppHeader } from "../components/layout/AppHeader";
 import { AppFooter } from "../components/layout/AppFooter";
 import { RadarPitchLoader } from "../components/ui/RadarPitchLoader";
+
+export type LiveMatch = {
+  fixtureId: string;
+  tournamentId: string;
+  tournamentName: string;
+  tournamentState: string;
+  venueName: string;
+  divisionId: string;
+  divisionName: string;
+  roundName: string;
+  pitch: number;
+  status: string;
+  period: string;
+  matchClockMinute: number;
+  clockStartedAt?: string | null;
+  clockRunning?: boolean;
+  clockElapsedSeconds?: number;
+  stoppageMinutes?: number;
+  clockPauseReason?: string | null;
+  matchDurationMinutes?: number;
+  homeScore: number;
+  awayScore: number;
+  homeScorePenalties?: number;
+  awayScorePenalties?: number;
+  homeTeamName: string;
+  homeClubName: string;
+  awayTeamName: string;
+  awayClubName: string;
+};
 
 type Division = {
   id: string;
@@ -98,7 +128,7 @@ export default function DiscoverClient({
   preferredState,
   preferredCity,
 }: {
-  user: ChatGPTUser;
+  user: ChatGPTUser | null;
   role: string;
   preferredState: string;
   preferredCity: string;
@@ -106,6 +136,7 @@ export default function DiscoverClient({
   const [items, setItems] = useState<Tournament[]>([]);
   const [states, setStates] = useState<string[]>([]);
   const [cities, setCities] = useState<string[]>([]);
+  const [liveMatches, setLiveMatches] = useState<LiveMatch[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [filters, setFilters] = useState({
@@ -116,8 +147,8 @@ export default function DiscoverClient({
   });
   const [applied, setApplied] = useState(filters);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (isSilent = false) => {
+    if (!isSilent) setLoading(true);
     try {
       const query = new URLSearchParams(
         Object.entries(applied).filter(([, value]) => value),
@@ -127,22 +158,33 @@ export default function DiscoverClient({
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error);
-      setItems(body.tournaments);
-      setStates(body.areas.states);
-      setCities(body.areas.cities);
+      setItems(body.tournaments || []);
+      setStates(body.areas?.states || []);
+      setCities(body.areas?.cities || []);
+      setLiveMatches(body.liveMatches || []);
       setError("");
     } catch (reason) {
-      setError(
-        reason instanceof Error ? reason.message : "Could not load tournaments",
-      );
+      if (!isSilent) {
+        setError(
+          reason instanceof Error ? reason.message : "Could not load tournaments",
+        );
+      }
     } finally {
-      setLoading(false);
+      if (!isSilent) setLoading(false);
     }
   }, [applied]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => void load(), 0);
+    const timer = window.setTimeout(() => void load(false), 0);
     return () => window.clearTimeout(timer);
+  }, [load]);
+
+  // Background refresh for live match telemetry
+  useEffect(() => {
+    const pollInterval = window.setInterval(() => {
+      void load(true);
+    }, 15000);
+    return () => window.clearInterval(pollInterval);
   }, [load]);
 
   const submit = (event: FormEvent) => {
@@ -205,13 +247,82 @@ export default function DiscoverClient({
 
             <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/80 space-y-2 text-xs shrink-0 w-full sm:w-auto">
               <span className="text-slate-400 uppercase font-bold text-[10px] tracking-wider block">Your Profile & Area</span>
-              <strong className="text-white text-sm font-bold block">{user.displayName}</strong>
+              <strong className="text-white text-sm font-bold block">{user ? user.displayName : "Guest Spectator"}</strong>
               <p className="text-amber-400 font-medium">
                 {preferredCity || "All India"} {preferredState ? `• ${preferredState}` : ""}
               </p>
             </div>
           </div>
         </section>
+
+        {/* Live Matchday Telemetry Section */}
+        {liveMatches.length > 0 && (
+          <section className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <span className="flex h-3 w-3 relative">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-rose-500" />
+                </span>
+                <h2 className="text-sm font-black uppercase tracking-wider text-rose-500 flex items-center gap-2">
+                  <span>Live Matchday Telemetry</span>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-500 border border-rose-500/20 font-mono">
+                    {liveMatches.length} {liveMatches.length === 1 ? "Match" : "Matches"} in Play
+                  </span>
+                </h2>
+              </div>
+              <span className="text-[11px] font-mono text-muted-foreground hidden sm:inline">
+                Real-time Pitch Updates • AIFF Grassroots Feeds
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {liveMatches.map((m) => {
+                const region = getRegionBadge(m.tournamentState);
+                const periodDisplay =
+                  m.period === "first_half"
+                    ? "1st Half"
+                    : m.period === "second_half"
+                      ? "2nd Half"
+                      : m.period === "halftime"
+                        ? "Half Time"
+                        : m.period === "fulltime"
+                          ? "Full Time"
+                          : m.period || "Live";
+
+                return (
+                  <div key={m.fixtureId} className="group relative space-y-2">
+                    <BroadcastScorebug
+                      tournamentName={`${m.tournamentName} • Pitch ${m.pitch}`}
+                      stateBadge={region.text}
+                      homeTeamName={m.homeTeamName}
+                      awayTeamName={m.awayTeamName}
+                      homeScore={m.homeScore}
+                      awayScore={m.awayScore}
+                      homePenaltyScore={m.homeScorePenalties}
+                      awayPenaltyScore={m.awayScorePenalties}
+                      matchMinute={m.matchClockMinute}
+                      clockStartedAt={m.clockStartedAt}
+                      clockRunning={m.clockRunning}
+                      clockElapsedSeconds={m.clockElapsedSeconds}
+                      stoppageTime={m.stoppageMinutes}
+                      clockPauseReason={m.clockPauseReason}
+                      matchDurationMinutes={m.matchDurationMinutes}
+                      periodText={periodDisplay}
+                      status="in_progress"
+                    />
+                    <Link
+                      href={`/tournament/${m.tournamentId}?tab=matches`}
+                      className="w-full py-2 px-3 rounded-xl bg-card hover:bg-muted text-amber-500 dark:text-amber-400 text-xs font-bold flex items-center justify-center gap-1.5 transition border border-border shadow-sm"
+                    >
+                      <Trophy size={13} /> View Match Telemetry & Pitch Radar
+                    </Link>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
 
         {/* Unified Search & Filters Form */}
         <form onSubmit={submit} className="cascade-2 p-4 rounded-2xl bg-card border border-border flex flex-wrap items-center gap-3 shadow-md">
@@ -302,6 +413,9 @@ export default function DiscoverClient({
               const minFee = item.divisions.length
                 ? Math.min(...item.divisions.map((d) => d.feePaise))
                 : 0;
+              const totalCapacity = item.divisions.reduce((acc, d) => acc + (d.maxTeams || 0), 0);
+              const hasCapacity = totalCapacity === 0 || item.registeredTeams < totalCapacity;
+              const canRegister = ["registration_open", "live", "scheduled"].includes(item.status) && hasCapacity;
 
               return (
                 <div
@@ -389,12 +503,13 @@ export default function DiscoverClient({
                       >
                         <Trophy size={14} /> Open Tournament
                       </Link>
-                      {item.status === "registration_open" && (
+                      {canRegister && role === "coach" && (
                         <Link
                           href={`/register/${item.id}`}
-                          className="px-3 py-2 rounded-xl bg-muted hover:bg-muted/80 text-foreground text-xs font-bold transition"
+                          className="px-3.5 py-2 rounded-xl text-xs font-black transition flex items-center gap-1.5 bg-gradient-to-r from-emerald-500 to-amber-500 text-slate-950 shadow-sm hover:opacity-95"
                         >
-                          Register Team
+                          <ShieldCheck size={14} />
+                          <span>Enroll Squad</span>
                         </Link>
                       )}
                     </div>

@@ -91,8 +91,16 @@ export default async function PublicTournamentPage(props: {
     .where(eq(announcements.tournamentId, id))
     .orderBy(desc(announcements.createdAt));
 
-  const playerRows = await db.select().from(players);
-  const squadRows = await db.select().from(squadMembers);
+  const entryIds = entryRows.map((e) => e.id);
+  const clubIds = Array.from(new Set(entryRows.map((e) => e.clubId).filter(Boolean))) as string[];
+
+  const squadRows = entryIds.length
+    ? await db.select().from(squadMembers).where(inArray(squadMembers.entryId, entryIds))
+    : [];
+
+  const playerRows = clubIds.length
+    ? await db.select().from(players).where(inArray(players.clubId, clubIds))
+    : [];
 
   const signedIn = await getChatGPTUser();
   let isFollowed = false;

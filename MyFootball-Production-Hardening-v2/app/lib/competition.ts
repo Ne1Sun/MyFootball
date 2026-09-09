@@ -22,10 +22,11 @@ export function normalizeFormat(value: string): CompetitionFormat {
 export function maxMinuteForPeriod(period: string, halfMinutes: number) {
   const firstEnd = halfMinutes;
   const secondEnd = halfMinutes * 2;
-  if (period === "first_half") return firstEnd;
-  if (period === "second_half") return secondEnd;
-  if (period === "extra_time") return secondEnd + halfMinutes;
-  return secondEnd;
+  const stoppageBuffer = 15; // Support up to 15 minutes of added injury/stoppage time per period
+  if (period === "first_half") return firstEnd + stoppageBuffer;
+  if (period === "second_half") return secondEnd + stoppageBuffer;
+  if (period === "extra_time") return secondEnd + halfMinutes + stoppageBuffer;
+  return secondEnd + stoppageBuffer;
 }
 
 export function shootoutIsDecided(home: number, away: number, homeTaken: number, awayTaken: number) {
@@ -33,7 +34,7 @@ export function shootoutIsDecided(home: number, away: number, homeTaken: number,
   if (homeTaken < regulationKicks || awayTaken < regulationKicks) {
     return home > away + (regulationKicks - awayTaken) || away > home + (regulationKicks - homeTaken);
   }
-  return homeTaken === awayTaken && homeTaken > regulationKicks && home !== away;
+  return homeTaken === awayTaken && homeTaken >= regulationKicks && home !== away;
 }
 
 /** Circle-method rounds. A null opponent represents a bye. */

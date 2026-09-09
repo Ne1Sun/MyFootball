@@ -2,21 +2,30 @@
 
 import { useEffect, useMemo, useState, useCallback } from "react";
 import {
+  AlertCircle,
   Check,
   CheckCircle2,
   Clock,
   LoaderCircle,
   Moon,
+  Pause,
+  PauseCircle,
+  Play,
+  Plus,
   RotateCcw,
+  Shield,
   Sun,
   Trash2,
   Trophy,
+  Wifi,
+  WifiOff,
   X,
   Zap,
 } from "lucide-react";
 import type { Division, Entry, Fixture, MatchEvent, Player, SquadMember, Tournament } from "../components/types";
 import { AppHeader } from "../components/layout/AppHeader";
 import { AppFooter } from "../components/layout/AppFooter";
+import { usePitchClock, PAUSE_REASONS, type PauseReasonKey } from "../lib/pitch-clock";
 
 // --- TYPES ---
 
@@ -25,6 +34,15 @@ export type ShootoutKick = {
   isHome: boolean;
   scored: boolean;
   shooterName?: string;
+};
+
+export type QueuedMutation = {
+  id: string; // client idempotency key UUIDv4
+  fixtureId: string;
+  action: string;
+  payload: Record<string, any>;
+  timestamp: number;
+  retryCount: number;
 };
 
 type RefereeData = {
@@ -52,6 +70,11 @@ type MatchWAL = {
   events: MatchEvent[];
   potmId?: string;
   refereeNotes?: string;
+  clockStartedAt?: string | null;
+  clockRunning?: boolean;
+  clockElapsedSeconds?: number;
+  stoppageMinutes?: number;
+  clockPauseReason?: string | null;
 };
 
 // --- HAPTIC FEEDBACK HELPER ---
@@ -97,6 +120,45 @@ const clearWAL = (fixtureId: string) => {
   } catch {
     // Ignore
   }
+};
+
+// --- PITCH-SIDE WRITE-AHEAD MUTATION QUEUE (PHASE C) ---
+
+const getQueueKey = (fixtureId: string) => `referee_mutation_queue_${fixtureId}`;
+
+export const loadMutationQueue = (fixtureId: string): QueuedMutation[] => {
+  if (typeof window === "undefined" || !fixtureId) return [];
+  try {
+    const raw = localStorage.getItem(getQueueKey(fixtureId));
+    if (!raw) return [];
+    return JSON.parse(raw) as QueuedMutation[];
+  } catch {
+    return [];
+  }
+};
+
+export const saveMutationQueue = (fixtureId: string, queue: QueuedMutation[]) => {
+  if (typeof window === "undefined" || !fixtureId) return;
+  try {
+    localStorage.setItem(getQueueKey(fixtureId), JSON.stringify(queue));
+  } catch {
+    // Ignore
+  }
+};
+
+export const enqueueMutation = (fixtureId: string, mutation: QueuedMutation): QueuedMutation[] => {
+  const current = loadMutationQueue(fixtureId);
+  if (current.some((m) => m.id === mutation.id)) return current;
+  const updated = [...current, mutation];
+  saveMutationQueue(fixtureId, updated);
+  return updated;
+};
+
+export const dequeueMutation = (fixtureId: string, mutationId: string): QueuedMutation[] => {
+  const current = loadMutationQueue(fixtureId);
+  const updated = current.filter((m) => m.id !== mutationId);
+  saveMutationQueue(fixtureId, updated);
+  return updated;
 };
 
 // --- FIFA 5-KICK + SUDDEN DEATH STATE MACHINE (SEC-01) ---
@@ -206,12 +268,20 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
   );
 
   // Daylight Mode Toggle (SEC-07)
-  const [daylightMode, setDaylightMode] = useState<boolean>(() => {
+  const [daylightMode, setDaylightMode] = useState<boolean>(false);
+
+  useEffect(() => {
     if (typeof window !== "undefined") {
-      return localStorage.getItem("referee_daylight_mode") === "true";
+      const stored = localStorage.getItem("referee_daylight_mode") === "true";
+      setDaylightMode(stored);
+      document.documentElement.dataset.daylight = String(stored);
     }
-    return false;
-  });
+    return () => {
+      if (typeof window !== "undefined") {
+        delete document.documentElement.dataset.daylight;
+      }
+    };
+  }, []);
 
   const toggleDaylightMode = () => {
     const next = !daylightMode;
@@ -219,6 +289,7 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
     triggerHaptic(25);
     if (typeof window !== "undefined") {
       localStorage.setItem("referee_daylight_mode", String(next));
+      document.documentElement.dataset.daylight = String(next);
     }
   };
 
@@ -279,6 +350,23 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
   // Calculated Shootout State
   const shootoutState = useMemo(() => calculateShootoutState(shootoutKicks), [shootoutKicks]);
 
+  // Autonomous IFAB Pitch Clock Engine
+  const pitchClock = usePitchClock(
+    currentFixture,
+    Math.ceil((division?.matchDurationMinutes || 90) / 2)
+  );
+  const [showPauseModal, setShowPauseModal] = useState(false);
+  const [selectedPauseReason, setSelectedPauseReason] = useState<PauseReasonKey>("foul");
+
+  // Auto-sync event modal minutes with the running pitch clock
+  useEffect(() => {
+    if (currentFixture?.status === "in_progress") {
+      setGoalMinute(pitchClock.displayMinute);
+      setCardMinute(pitchClock.displayMinute);
+      setSubMinute(pitchClock.displayMinute);
+    }
+  }, [pitchClock.displayMinute, currentFixture?.status]);
+
   // Update default teams when homeEntry changes
   useEffect(() => {
     if (homeEntry) {
@@ -293,8 +381,12 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
     if (!currentFixture) return;
     const wal = loadWAL(currentFixture.id);
     if (wal && wal.fixtureId === currentFixture.id) {
-      // Check if WAL has newer information than initial server state
-      const hasNewerClock = wal.matchClockMinute > (currentFixture.matchClockMinute || 0);
+      // Check if WAL has newer information than initial server state (including sub-minute pauses and stoppage)
+      const hasNewerClock =
+        wal.matchClockMinute > (currentFixture.matchClockMinute || 0) ||
+        (wal.clockElapsedSeconds !== undefined && wal.clockElapsedSeconds > (currentFixture.clockElapsedSeconds || 0)) ||
+        (wal.clockRunning !== undefined && Boolean(wal.clockRunning) !== Boolean(currentFixture.clockRunning)) ||
+        (wal.stoppageMinutes !== undefined && wal.stoppageMinutes !== (currentFixture.stoppageMinutes || 0));
       const hasNewerScore = wal.homeScore !== currentFixture.homeScore || wal.awayScore !== currentFixture.awayScore;
       const hasShootoutKicks = wal.shootoutKicks && wal.shootoutKicks.length > 0;
       const hasExtraEvents = wal.events && wal.events.length > matchEvents.length;
@@ -319,6 +411,11 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
                 awayScore: wal.awayScore,
                 homeScorePenalties: wal.homeScorePenalties,
                 awayScorePenalties: wal.awayScorePenalties,
+                clockStartedAt: wal.clockStartedAt !== undefined ? wal.clockStartedAt : f.clockStartedAt,
+                clockRunning: wal.clockRunning !== undefined ? wal.clockRunning : f.clockRunning,
+                clockElapsedSeconds: Math.max(f.clockElapsedSeconds || 0, wal.clockElapsedSeconds || 0),
+                stoppageMinutes: wal.stoppageMinutes !== undefined ? wal.stoppageMinutes : (f.stoppageMinutes || 0),
+                clockPauseReason: wal.clockPauseReason !== undefined ? wal.clockPauseReason : f.clockPauseReason,
               };
             }
             return f;
@@ -364,6 +461,11 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
         events: overrides?.events ?? matchEvents,
         potmId: overrides?.potmId ?? potmId,
         refereeNotes: overrides?.refereeNotes ?? refereeNotes,
+        clockStartedAt: overrides?.clockStartedAt ?? currentFixture.clockStartedAt ?? null,
+        clockRunning: overrides?.clockRunning ?? currentFixture.clockRunning ?? false,
+        clockElapsedSeconds: overrides?.clockElapsedSeconds ?? currentFixture.clockElapsedSeconds ?? 0,
+        stoppageMinutes: overrides?.stoppageMinutes ?? currentFixture.stoppageMinutes ?? 0,
+        clockPauseReason: overrides?.clockPauseReason ?? currentFixture.clockPauseReason ?? null,
       };
       saveWAL(walPayload);
     },
@@ -377,14 +479,180 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
         const json = await res.json();
         setData((prev) => ({
           ...prev,
-          fixtures: json.fixtures || [],
-          events: json.events || [],
-          players: json.players || [],
-          squadMembers: json.squadMembers || [],
+          fixtures: Array.isArray(json.fixtures) && json.fixtures.length > 0 ? json.fixtures : prev.fixtures,
+          events: Array.isArray(json.events) ? json.events : prev.events,
+          players: Array.isArray(json.players) && json.players.length > 0 ? json.players : prev.players,
+          squadMembers: Array.isArray(json.squadMembers) && json.squadMembers.length > 0 ? json.squadMembers : prev.squadMembers,
+          entries: Array.isArray(json.entries) && json.entries.length > 0 ? json.entries : prev.entries,
+          divisions: Array.isArray(json.divisions) && json.divisions.length > 0 ? json.divisions : prev.divisions,
+          tournaments: Array.isArray(json.tournaments) && json.tournaments.length > 0 ? json.tournaments : prev.tournaments,
         }));
       }
     } catch {
       // Ignore network errors - WAL maintains offline state
+    }
+  };
+
+  // --- PITCH-SIDE WRITE-AHEAD REPLAY ENGINE (PHASE C) ---
+  const [pendingQueue, setPendingQueue] = useState<QueuedMutation[]>([]);
+  const [isOnline, setIsOnline] = useState<boolean>(typeof navigator !== "undefined" ? navigator.onLine : true);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+
+  const drainMutationQueue = useCallback(async () => {
+    if (!currentFixture || isSyncing) return;
+    const queue = loadMutationQueue(currentFixture.id);
+    if (!queue.length) return;
+
+    setIsSyncing(true);
+    let remaining = [...queue];
+
+    for (const item of queue) {
+      try {
+        const res = await fetch("/api/app", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(item.payload),
+        });
+
+        if (res.ok) {
+          remaining = dequeueMutation(currentFixture.id, item.id);
+          setPendingQueue(remaining);
+        } else if (res.status >= 400 && res.status < 500) {
+          // Poison pill (domain rejection) - evict from queue to avoid head-of-line blocking
+          const err = await res.json().catch(() => ({}));
+          remaining = dequeueMutation(currentFixture.id, item.id);
+          setPendingQueue(remaining);
+          setToast(`Offline replay rejected: ${err.error || "Rule violation"}. Rolled back.`);
+          setTimeout(() => setToast(""), 4000);
+        } else {
+          // 5xx / Network error: halt drain to preserve FIFO sequence
+          break;
+        }
+      } catch {
+        // Network drop: halt drain
+        break;
+      }
+    }
+
+    await refreshData();
+    setIsSyncing(false);
+  }, [currentFixture, isSyncing]);
+
+  useEffect(() => {
+    if (!currentFixture) return;
+    setPendingQueue(loadMutationQueue(currentFixture.id));
+
+    const handleOnline = () => {
+      setIsOnline(true);
+      drainMutationQueue();
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        drainMutationQueue();
+      }
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    const intervalId = setInterval(() => {
+      if (typeof navigator !== "undefined" && navigator.onLine) {
+        drainMutationQueue();
+      }
+    }, 12000);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      clearInterval(intervalId);
+    };
+  }, [currentFixture?.id, drainMutationQueue]);
+
+  const dispatchMatchEvent = async (
+    action: string,
+    payload: Record<string, any>,
+    optimisticWal: Partial<MatchWAL>,
+    successMessage: string
+  ) => {
+    if (!currentFixture) return;
+    persistCurrentWAL(optimisticWal);
+
+    // Synchronously apply optimistic update to in-memory React state for zero-latency pitch responsiveness
+    if (optimisticWal) {
+      setData((prev) => ({
+        ...prev,
+        fixtures: prev.fixtures.map((f) =>
+          f.id === currentFixture.id
+            ? {
+                ...f,
+                ...optimisticWal,
+                homeScore: optimisticWal.homeScore ?? f.homeScore,
+                awayScore: optimisticWal.awayScore ?? f.awayScore,
+                matchClockMinute: optimisticWal.matchClockMinute ?? f.matchClockMinute,
+                period: (optimisticWal.period as any) ?? f.period,
+                status: (optimisticWal.status as any) ?? f.status,
+                clockRunning: optimisticWal.clockRunning !== undefined ? optimisticWal.clockRunning : f.clockRunning,
+                clockStartedAt: optimisticWal.clockStartedAt !== undefined ? optimisticWal.clockStartedAt : f.clockStartedAt,
+                clockElapsedSeconds: optimisticWal.clockElapsedSeconds !== undefined ? optimisticWal.clockElapsedSeconds : f.clockElapsedSeconds,
+                clockPauseReason: optimisticWal.clockPauseReason !== undefined ? optimisticWal.clockPauseReason : f.clockPauseReason,
+                stoppageMinutes: optimisticWal.stoppageMinutes !== undefined ? optimisticWal.stoppageMinutes : f.stoppageMinutes,
+              }
+            : f
+        ),
+      }));
+    }
+
+    const eventId = payload.eventId || crypto.randomUUID();
+    const finalPayload = { ...payload, eventId };
+
+    const mutation: QueuedMutation = {
+      id: eventId,
+      fixtureId: currentFixture.id,
+      action,
+      payload: finalPayload,
+      timestamp: Date.now(),
+      retryCount: 0,
+    };
+
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      const updated = enqueueMutation(currentFixture.id, mutation);
+      setPendingQueue(updated);
+      setToast("Offline: Event saved to pitch queue. Will sync automatically.");
+      setTimeout(() => setToast(""), 4000);
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/app", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(finalPayload),
+      });
+
+      if (!response.ok) {
+        if (response.status >= 400 && response.status < 500) {
+          const err = await response.json().catch(() => ({}));
+          const errMsg = err.error || "Event rejected by match rules";
+          setToast(`⚠️ ${errMsg}`);
+          setTimeout(() => setToast(""), 4000);
+          await refreshData();
+          return;
+        }
+        throw new Error("Server communication error");
+      }
+
+      setToast(successMessage);
+      setTimeout(() => setToast(""), 3000);
+    } catch (err) {
+      const updated = enqueueMutation(currentFixture.id, mutation);
+      setPendingQueue(updated);
+      setToast("Connection drop: Event queued in pitch storage. Replaying soon...");
+      setTimeout(() => setToast(""), 4000);
     }
   };
 
@@ -397,31 +665,140 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
     const newPeriod = period;
     const newStatus = status || currentFixture.status;
 
-    // Write-Ahead to WAL immediately (SEC-06)
-    persistCurrentWAL({
+    const payloadUpdates: Record<string, any> = {
+      action: "updateLiveMatch",
+      fixtureId: currentFixture.id,
       matchClockMinute: newMinute,
       period: newPeriod,
       status: newStatus,
-    });
+    };
 
-    try {
-      const response = await fetch("/api/app", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "updateLiveMatch",
-          fixtureId: currentFixture.id,
-          matchClockMinute: newMinute,
-          period: newPeriod,
-          status: newStatus,
-        }),
-      });
-      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || "Clock update was rejected");
-    } catch (error) {
-      clearWAL(currentFixture.id);
-      setToast(error instanceof Error ? error.message : "Clock update was rejected");
-      setTimeout(() => setToast(""), 4000);
+    const optUpdates: Record<string, any> = {
+      matchClockMinute: newMinute,
+      period: newPeriod,
+      status: newStatus,
+    };
+
+    const halfMinutes = Math.ceil((division?.matchDurationMinutes || 90) / 2);
+    if (period === "half_time") {
+      payloadUpdates.clockRunning = false;
+      payloadUpdates.clockStartedAt = null;
+      payloadUpdates.clockElapsedSeconds = halfMinutes * 60;
+      payloadUpdates.stoppageMinutes = 0;
+      payloadUpdates.clockPauseReason = null;
+
+      optUpdates.clockRunning = false;
+      optUpdates.clockStartedAt = null;
+      optUpdates.clockElapsedSeconds = halfMinutes * 60;
+      optUpdates.stoppageMinutes = 0;
+      optUpdates.clockPauseReason = null;
+    } else if (period === "second_half" && currentFixture.period === "half_time") {
+      const nowIso = new Date().toISOString();
+      payloadUpdates.clockRunning = true;
+      payloadUpdates.clockStartedAt = nowIso;
+      payloadUpdates.clockElapsedSeconds = halfMinutes * 60;
+      payloadUpdates.stoppageMinutes = 0;
+      payloadUpdates.clockPauseReason = null;
+
+      optUpdates.clockRunning = true;
+      optUpdates.clockStartedAt = nowIso;
+      optUpdates.clockElapsedSeconds = halfMinutes * 60;
+      optUpdates.stoppageMinutes = 0;
+      optUpdates.clockPauseReason = null;
+    } else if (newStatus === "completed") {
+      payloadUpdates.clockRunning = false;
+      payloadUpdates.clockStartedAt = null;
+      payloadUpdates.clockPauseReason = null;
+
+      optUpdates.clockRunning = false;
+      optUpdates.clockStartedAt = null;
+      optUpdates.clockPauseReason = null;
     }
+
+    await dispatchMatchEvent(
+      "updateLiveMatch",
+      payloadUpdates,
+      optUpdates,
+      "Clock updated"
+    );
+
+    await refreshData();
+    setBusy(false);
+  };
+
+  const handlePauseMatch = async (reason: PauseReasonKey = "foul") => {
+    if (!currentFixture) return;
+    triggerHaptic([30, 30]);
+    setBusy(true);
+    setShowPauseModal(false);
+
+    const currentElapsed = pitchClock.totalSeconds;
+    const minute = pitchClock.displayMinute;
+
+    await dispatchMatchEvent(
+      "pauseMatchClock",
+      {
+        action: "pauseMatchClock",
+        fixtureId: currentFixture.id,
+        reason,
+        clientElapsedSeconds: currentElapsed,
+      },
+      {
+        clockRunning: false,
+        clockStartedAt: null,
+        clockElapsedSeconds: currentElapsed,
+        clockPauseReason: reason,
+        matchClockMinute: minute,
+      },
+      `Match clock paused: ${PAUSE_REASONS[reason]?.short || reason}`
+    );
+
+    await refreshData();
+    setBusy(false);
+  };
+
+  const handleResumeMatch = async () => {
+    if (!currentFixture) return;
+    triggerHaptic(50);
+    setBusy(true);
+
+    const nowIso = new Date().toISOString();
+
+    await dispatchMatchEvent(
+      "resumeMatchClock",
+      {
+        action: "resumeMatchClock",
+        fixtureId: currentFixture.id,
+      },
+      {
+        clockRunning: true,
+        clockStartedAt: nowIso,
+        clockPauseReason: null,
+      },
+      "Match play resumed"
+    );
+
+    await refreshData();
+    setBusy(false);
+  };
+
+  const handleSetStoppageTime = async (minutes: number) => {
+    if (!currentFixture) return;
+    triggerHaptic(30);
+    setBusy(true);
+
+    await dispatchMatchEvent(
+      "setStoppageTime",
+      {
+        action: "setStoppageTime",
+        fixtureId: currentFixture.id,
+        stoppageMinutes: minutes,
+      },
+      {
+        stoppageMinutes: minutes,
+      },
+      `4th Official Board: +${minutes} Min Stoppage`
+    );
 
     await refreshData();
     setBusy(false);
@@ -462,16 +839,23 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
       shootoutKicks: nextKicks,
     });
 
-    // Update live match period and penalty scores
+    // Update live match period and persist shootout kick to server DB (VIBE-01 Fix)
+    const kickEntryId = isHome ? homeEntry?.id : awayEntry?.id;
+    const kickPlayers = isHome ? homePlayers : awayPlayers;
+    const kickerPlayer = kickPlayers.find((p) => p.name === (shooterName || shootoutShooterName)) || kickPlayers[(nextKicks.length - 1) % (kickPlayers.length || 1)];
+    const kickerId = kickerPlayer?.id || (kickPlayers[0]?.id || "unassigned");
+
     try {
       await fetch("/api/app", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          action: "updateLiveMatch",
+          action: "recordShootoutKick",
           fixtureId: currentFixture.id,
-          period: "penalties",
-          status: "in_progress",
+          entryId: kickEntryId,
+          playerId: kickerId,
+          sequence: nextKicks.length,
+          scored,
         }),
       });
     } catch {
@@ -562,36 +946,29 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
       createdAt: new Date().toISOString(),
     };
 
-    // WAL Write-Ahead
-    persistCurrentWAL({
-      events: [optimisticEvent, ...matchEvents],
-      homeScore: isHome && goalType !== "own_goal" ? currentFixture.homeScore + 1 : currentFixture.homeScore,
-      awayScore: !isHome && goalType !== "own_goal" ? currentFixture.awayScore + 1 : currentFixture.awayScore,
-    });
+    await dispatchMatchEvent(
+      "recordDetailedMatchEvent",
+      {
+        action: "recordDetailedMatchEvent",
+        eventId: tempEventId,
+        fixtureId: currentFixture.id,
+        entryId: goalTeam,
+        type: goalType,
+        playerName: scorer?.name || "Player",
+        playerId: scorer?.id || null,
+        assistPlayerName: assist?.name || "",
+        assistPlayerId: assist?.id || null,
+        matchMinute: goalMinute,
+        matchPeriod: currentFixture.period || "first_half",
+      },
+      {
+        events: [optimisticEvent, ...matchEvents],
+        homeScore: isHome && goalType !== "own_goal" ? currentFixture.homeScore + 1 : currentFixture.homeScore,
+        awayScore: !isHome && goalType !== "own_goal" ? currentFixture.awayScore + 1 : currentFixture.awayScore,
+      },
+      "Goal recorded!"
+    );
 
-    try {
-      await fetch("/api/app", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "recordDetailedMatchEvent",
-          fixtureId: currentFixture.id,
-          entryId: goalTeam,
-          type: goalType,
-          playerName: scorer?.name || "Player",
-          playerId: scorer?.id || null,
-          assistPlayerName: assist?.name || "",
-          assistPlayerId: assist?.id || null,
-          matchMinute: goalMinute,
-          matchPeriod: currentFixture.period || "first_half",
-        }),
-      });
-    } catch {
-      // WAL persisted
-    }
-
-    setToast("Goal recorded!");
-    setTimeout(() => setToast(""), 3000);
     setActiveModal(null);
     await refreshData();
     setBusy(false);
@@ -607,48 +984,57 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
     const teamPlayers = isHome ? homePlayers : awayPlayers;
     const player = teamPlayers.find((p) => p.id === cardPlayerId);
 
+    // IFAB Law 12 Check: Card Accumulation (2nd Yellow = RED Expulsion)
+    const existingYellows = matchEvents.filter(
+      (ev) => ev.playerId === cardPlayerId && (ev.type === "yellow_card" || ev.type === "yellow")
+    ).length;
+    const isSecondYellow = cardType === "yellow_card" && existingYellows >= 1;
+    const finalCardType = isSecondYellow ? "second_yellow" : cardType;
+    const cardToast = isSecondYellow
+      ? `🚨 SECOND YELLOW! ${player?.name || "Player"} has been expelled (RED CARD)!`
+      : cardType === "red_card"
+      ? `🟥 Straight Red Card issued to ${player?.name || "Player"}!`
+      : "Card sanction issued!";
+
+    if (isSecondYellow) {
+      triggerHaptic([100, 50, 100]);
+    }
+
     const tempEventId = crypto.randomUUID();
     const optimisticEvent: MatchEvent = {
       id: tempEventId,
       fixtureId: currentFixture.id,
       entryId: cardTeam,
-      type: cardType,
+      type: finalCardType,
       playerName: player?.name || "Player",
       playerId: player?.id || null,
-      cardReason,
+      cardReason: isSecondYellow ? `Second Yellow: ${cardReason}` : cardReason,
       matchMinute: cardMinute,
       matchPeriod: currentFixture.period || "first_half",
       recordedBy: data.user?.email || "referee",
       createdAt: new Date().toISOString(),
     };
 
-    // WAL Write-Ahead
-    persistCurrentWAL({
-      events: [optimisticEvent, ...matchEvents],
-    });
+    await dispatchMatchEvent(
+      "recordDetailedMatchEvent",
+      {
+        action: "recordDetailedMatchEvent",
+        eventId: tempEventId,
+        fixtureId: currentFixture.id,
+        entryId: cardTeam,
+        type: finalCardType,
+        playerName: player?.name || "Player",
+        playerId: player?.id || null,
+        cardReason: isSecondYellow ? `Second Yellow: ${cardReason}` : cardReason,
+        matchMinute: cardMinute,
+        matchPeriod: currentFixture.period || "first_half",
+      },
+      {
+        events: [optimisticEvent, ...matchEvents],
+      },
+      cardToast
+    );
 
-    try {
-      await fetch("/api/app", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "recordDetailedMatchEvent",
-          fixtureId: currentFixture.id,
-          entryId: cardTeam,
-          type: cardType,
-          playerName: player?.name || "Player",
-          playerId: player?.id || null,
-          cardReason,
-          matchMinute: cardMinute,
-          matchPeriod: currentFixture.period || "first_half",
-        }),
-      });
-    } catch {
-      // WAL persisted
-    }
-
-    setToast("Card sanction issued!");
-    setTimeout(() => setToast(""), 3000);
     setActiveModal(null);
     await refreshData();
     setBusy(false);
@@ -681,34 +1067,43 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
       createdAt: new Date().toISOString(),
     };
 
-    // WAL Write-Ahead
-    persistCurrentWAL({
-      events: [optimisticEvent, ...matchEvents],
-    });
+    await dispatchMatchEvent(
+      "recordDetailedMatchEvent",
+      {
+        action: "recordDetailedMatchEvent",
+        eventId: tempEventId,
+        fixtureId: currentFixture.id,
+        entryId: subTeam,
+        type: "substitution",
+        playerName: playerOut?.name || "Player Out",
+        playerId: playerOut?.id || null,
+        relatedPlayerName: playerIn?.name || "Player In",
+        assistPlayerId: playerIn?.id || null,
+        matchMinute: subMinute,
+        matchPeriod: currentFixture.period || "second_half",
+      },
+      {
+        events: [optimisticEvent, ...matchEvents],
+      },
+      "Substitution recorded!"
+    );
 
+    // Sync squadMembers isStarting in DB so on-pitch tactical lineups update immediately (IFAB Law 3)
     try {
       await fetch("/api/app", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          action: "recordDetailedMatchEvent",
-          fixtureId: currentFixture.id,
+          action: "syncMatchSubstitution",
           entryId: subTeam,
-          type: "substitution",
-          playerName: playerOut?.name || "Player Out",
-          playerId: playerOut?.id || null,
-          relatedPlayerName: playerIn?.name || "Player In",
-          assistPlayerId: playerIn?.id || null,
-          matchMinute: subMinute,
-          matchPeriod: currentFixture.period || "second_half",
+          subOutId,
+          subInId,
         }),
       });
     } catch {
-      // WAL persisted
+      // Non-blocking for offline continuity
     }
 
-    setToast("Substitution recorded!");
-    setTimeout(() => setToast(""), 3000);
     setActiveModal(null);
     await refreshData();
     setBusy(false);
@@ -771,6 +1166,33 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
     setBusy(false);
   };
 
+  if (!currentFixture || data.fixtures.length === 0) {
+    return (
+      <div
+        className={`min-h-screen flex flex-col font-sans transition-colors duration-200 ${
+          daylightMode ? "bg-white text-black" : "bg-background text-foreground"
+        }`}
+      >
+        <AppHeader activeRoute="referee" user={data.user} />
+        <main className="flex-1 max-w-3xl w-full mx-auto p-8 flex flex-col items-center justify-center text-center space-y-4">
+          <div className="p-4 rounded-3xl bg-amber-500/10 border border-amber-500/30 text-amber-500">
+            <Timer size={48} />
+          </div>
+          <h2 className="text-xl font-black">No Active Fixtures Assigned</h2>
+          <p className="text-sm text-neutral-500 max-w-md">
+            There are currently no scheduled or live matches assigned to your referee console. Fixtures will appear here once generated by tournament organizers.
+          </p>
+          <button
+            onClick={refreshData}
+            className="px-5 py-2.5 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs transition shadow"
+          >
+            Check for Fixtures
+          </button>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div
       className={`min-h-screen flex flex-col font-sans transition-colors duration-200 ${
@@ -832,7 +1254,7 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
                 const a = data.entries.find((e) => e.id === f.awayEntryId);
                 return (
                   <option key={f.id} value={f.id}>
-                    Pitch {f.pitch}: {h?.teamName || "TBD"} vs {a?.teamName || "TBD"} [{f.period.toUpperCase()}]
+                    Pitch {f.pitch}: {h?.teamName || "TBD"} vs {a?.teamName || "TBD"} [{f.period ? f.period.replace(/_/g, " ").toUpperCase() : "FIRST HALF"}]
                   </option>
                 );
               })}
@@ -853,6 +1275,53 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
             {daylightMode ? <Moon size={15} /> : <Sun size={15} />}
             <span>{daylightMode ? "Daylight Mode (Active)" : "Daylight Mode"}</span>
           </button>
+        </div>
+
+        {/* Offline Pitch HUD & Sync Indicator (Phase C) */}
+        <div
+          className={`px-4 py-2.5 rounded-2xl flex items-center justify-between gap-3 text-xs transition border ${
+            daylightMode
+              ? "bg-white text-black border-2 border-black"
+              : !isOnline
+              ? "bg-rose-950/40 text-rose-300 border-rose-800/60"
+              : pendingQueue.length > 0
+              ? "bg-amber-950/40 text-amber-300 border-amber-800/60"
+              : "bg-slate-900/90 text-slate-300 border-slate-800"
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {!isOnline ? (
+              <WifiOff size={15} className="text-rose-400" />
+            ) : pendingQueue.length > 0 ? (
+              <RotateCcw size={15} className={`text-amber-400 ${isSyncing ? "animate-spin" : ""}`} />
+            ) : (
+              <Wifi size={15} className="text-emerald-400" />
+            )}
+            <span className="font-bold">
+              {!isOnline
+                ? `Offline Pitch Mode (${pendingQueue.length} events queued in LocalStorage WAL)`
+                : pendingQueue.length > 0
+                ? isSyncing
+                  ? `Syncing ${pendingQueue.length} queued events with cloud...`
+                  : `Online • ${pendingQueue.length} pending events ready to sync`
+                : "Live Cloud Synced • Local WAL Authoritative"}
+            </span>
+          </div>
+
+          {pendingQueue.length > 0 && (
+            <button
+              onClick={() => drainMutationQueue()}
+              disabled={isSyncing}
+              className={`px-3 py-1 rounded-xl text-[11px] font-black transition flex items-center gap-1.5 ${
+                daylightMode
+                  ? "bg-black text-white hover:bg-neutral-800"
+                  : "bg-amber-500 hover:bg-amber-400 text-slate-950"
+              }`}
+            >
+              <RotateCcw size={12} className={isSyncing ? "animate-spin" : ""} />
+              {isSyncing ? "Replaying..." : "Sync Now"}
+            </button>
+          )}
         </div>
 
         {/* Pitch Digital Clock & Timer HUD */}
@@ -876,84 +1345,169 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
             </span>
           </div>
 
-          {/* Huge Match Minute */}
-          <div className="flex items-center justify-center gap-4 py-2">
-            <div
-              className={`text-6xl sm:text-7xl font-black font-mono tracking-tighter ${
-                daylightMode ? "text-black" : "text-white"
-              }`}
-            >
-              {currentFixture?.matchClockMinute}&apos;
-            </div>
-            <div className="text-left space-y-1">
-              <span
-                className={`text-xs uppercase font-black px-2.5 py-1 rounded-full block border ${
-                  daylightMode
-                    ? "bg-amber-400 text-black border-black"
-                    : "bg-amber-500/20 text-amber-400 border-amber-500/30"
+          {/* Autonomous Pitch Clock & Timer HUD */}
+          <div className="space-y-3 py-1">
+            <div className="flex items-center justify-center gap-3">
+              <div
+                className={`text-5xl sm:text-6xl font-black font-mono tracking-tighter ${
+                  pitchClock.isPaused
+                    ? "text-amber-400 animate-pulse"
+                    : daylightMode
+                    ? "text-black"
+                    : "text-white"
                 }`}
               >
-                {currentFixture?.period.replace("_", " ").toUpperCase()}
-              </span>
-              <span className={`text-[11px] font-mono font-bold block ${daylightMode ? "text-neutral-700" : "text-slate-400"}`}>
-                STATUS: {currentFixture?.status.toUpperCase()}
-              </span>
+                {pitchClock.formattedClock}
+              </div>
+              <div className="text-left space-y-1">
+                <span
+                  className={`text-xs uppercase font-black px-2.5 py-1 rounded-full block border ${
+                    daylightMode
+                      ? "bg-amber-400 text-black border-black"
+                      : "bg-amber-500/20 text-amber-400 border-amber-500/30"
+                  }`}
+                >
+                  {currentFixture?.period ? currentFixture.period.replace(/_/g, " ").toUpperCase() : "FIRST HALF"}
+                </span>
+                <span className={`text-[11px] font-mono font-bold block ${daylightMode ? "text-neutral-700" : "text-slate-400"}`}>
+                  {pitchClock.isRunning ? "⏱️ TICKING" : pitchClock.isPaused ? "⏸️ PAUSED" : `STATUS: ${(currentFixture?.status || "SCHEDULED").toUpperCase()}`}
+                </span>
+              </div>
             </div>
+
+            {/* Pause Notification Banner with active pause reason */}
+            {pitchClock.isPaused && (
+              <div className="flex items-center justify-center gap-2 py-1.5 px-3 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-400 text-xs font-bold animate-pulse">
+                <span>{pitchClock.pauseConfig?.icon || "⏸️"}</span>
+                <span>MATCH PAUSED: {pitchClock.pauseConfig?.label || "Play Halted by Referee"}</span>
+              </div>
+            )}
+
+            {/* Stoppage Allowance Chip */}
+            {pitchClock.stoppageAllowanceMinutes > 0 && (
+              <div className="inline-flex items-center gap-1.5 px-3 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-[11px] font-mono font-black">
+                <span>+ {pitchClock.stoppageAllowanceMinutes}&apos; Stoppage Added (IFAB Law 7.3)</span>
+              </div>
+            )}
           </div>
 
-          {/* Timer Action Buttons */}
+          {/* Referee Instant Clock Control Deck */}
           <div
-            className={`grid grid-cols-4 gap-2 pt-3 border-t ${
+            className={`space-y-3 pt-3 border-t ${
               daylightMode ? "border-black" : "border-slate-800"
             }`}
           >
-            <button
-              onClick={() => handleUpdateClock((currentFixture?.matchClockMinute || 0) + 1, currentFixture?.period || "first_half")}
-              disabled={busy}
-              className={`p-3 rounded-2xl font-mono font-black text-sm transition shadow-sm ${
-                daylightMode
-                  ? "bg-white text-black hover:bg-neutral-100 border-2 border-black"
-                  : "bg-slate-800 hover:bg-slate-700 text-white"
-              }`}
-            >
-              +1&apos; Min
-            </button>
-            <button
-              onClick={() => handleUpdateClock(45, "half_time", "in_progress")}
-              disabled={busy}
-              className={`p-3 rounded-2xl font-black text-xs transition shadow-sm ${
-                daylightMode
-                  ? "bg-amber-400 text-black hover:bg-amber-500 border-2 border-black"
-                  : "bg-amber-600/80 hover:bg-amber-600 text-white"
-              }`}
-            >
-              Half-Time
-            </button>
-            <button
-              onClick={() => handleUpdateClock(45, "second_half", "in_progress")}
-              disabled={busy}
-              className={`p-3 rounded-2xl font-black text-xs transition shadow-sm ${
-                daylightMode
-                  ? "bg-emerald-500 text-black hover:bg-emerald-400 border-2 border-black"
-                  : "bg-emerald-600/80 hover:bg-emerald-600 text-white"
-              }`}
-            >
-              2nd Half
-            </button>
-            <button
-              onClick={() => {
-                triggerHaptic(40);
-                setActiveModal("report");
-              }}
-              disabled={busy}
-              className={`p-3 rounded-2xl font-black text-xs transition shadow-sm ${
-                daylightMode
-                  ? "bg-rose-600 text-white hover:bg-rose-700 border-2 border-black"
-                  : "bg-rose-600 hover:bg-rose-500 text-white"
-              }`}
-            >
-              Full-Time
-            </button>
+            {/* 1-Tap Pause / Resume Primary Action Bar */}
+            {currentFixture?.status === "in_progress" && (
+              <div>
+                {pitchClock.isPaused ? (
+                  <button
+                    onClick={handleResumeMatch}
+                    disabled={busy}
+                    className="w-full py-3.5 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-sm flex items-center justify-center gap-2 shadow-lg transition active:scale-[0.98]"
+                  >
+                    <Play size={18} fill="currentColor" />
+                    <span>▶️ RESUME MATCH PLAY</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setShowPauseModal(true)}
+                    disabled={busy}
+                    className="w-full py-3 px-4 rounded-2xl bg-amber-600 hover:bg-amber-500 text-white font-black text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md transition active:scale-[0.98]"
+                  >
+                    <Pause size={16} fill="currentColor" />
+                    <span>⏸️ PAUSE CLOCK (FOUL / INJURY / BREAK)</span>
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* 4th Official Stoppage Time Board */}
+            <div className="flex items-center justify-between gap-1 pt-1">
+              <span className={`text-[10px] font-bold uppercase tracking-wider ${daylightMode ? "text-neutral-700" : "text-slate-400"}`}>
+                Stoppage Board:
+              </span>
+              <div className="flex items-center gap-1">
+                {[1, 2, 3, 5].map((mins) => (
+                  <button
+                    key={mins}
+                    onClick={() => handleSetStoppageTime(mins)}
+                    disabled={busy}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-mono font-black transition border ${
+                      pitchClock.stoppageAllowanceMinutes === mins
+                        ? "bg-amber-500 text-slate-950 border-amber-400 font-extrabold"
+                        : daylightMode
+                        ? "bg-neutral-100 text-black border-black hover:bg-neutral-200"
+                        : "bg-slate-800 text-slate-200 border-slate-700 hover:bg-slate-700"
+                    }`}
+                  >
+                    +{mins}&apos;
+                  </button>
+                ))}
+                {pitchClock.stoppageAllowanceMinutes > 0 && (
+                  <button
+                    onClick={() => handleSetStoppageTime(0)}
+                    disabled={busy}
+                    className="px-2 py-1 rounded-lg text-[10px] font-bold text-rose-400 bg-rose-950/40 border border-rose-800/50 hover:bg-rose-900/50 transition"
+                    title="Reset Stoppage"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Period Transition Buttons */}
+            <div className="grid grid-cols-4 gap-2 pt-1">
+              <button
+                onClick={() => handleUpdateClock((currentFixture?.matchClockMinute || 0) + 1, currentFixture?.period || "first_half")}
+                disabled={busy}
+                className={`p-2.5 rounded-2xl font-mono font-black text-xs transition shadow-sm ${
+                  daylightMode
+                    ? "bg-white text-black hover:bg-neutral-100 border-2 border-black"
+                    : "bg-slate-800 hover:bg-slate-700 text-white"
+                }`}
+                title="Manual fallback nudge"
+              >
+                +1&apos; Min
+              </button>
+              <button
+                onClick={() => handleUpdateClock(Math.ceil((division?.matchDurationMinutes || 90) / 2), "half_time", "in_progress")}
+                disabled={busy}
+                className={`p-2.5 rounded-2xl font-black text-xs transition shadow-sm ${
+                  daylightMode
+                    ? "bg-amber-400 text-black hover:bg-amber-500 border-2 border-black"
+                    : "bg-amber-600/80 hover:bg-amber-600 text-white"
+                }`}
+              >
+                Half-Time
+              </button>
+              <button
+                onClick={() => handleUpdateClock(Math.ceil((division?.matchDurationMinutes || 90) / 2), "second_half", "in_progress")}
+                disabled={busy}
+                className={`p-2.5 rounded-2xl font-black text-xs transition shadow-sm ${
+                  daylightMode
+                    ? "bg-emerald-500 text-black hover:bg-emerald-400 border-2 border-black"
+                    : "bg-emerald-600/80 hover:bg-emerald-600 text-white"
+                }`}
+              >
+                2nd Half
+              </button>
+              <button
+                onClick={() => {
+                  triggerHaptic(40);
+                  setActiveModal("report");
+                }}
+                disabled={busy}
+                className={`p-2.5 rounded-2xl font-black text-xs transition shadow-sm ${
+                  daylightMode
+                    ? "bg-rose-600 text-white hover:bg-rose-700 border-2 border-black"
+                    : "bg-rose-600 hover:bg-rose-500 text-white"
+                }`}
+              >
+                Full-Time
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1052,7 +1606,7 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
           <button
             onClick={() => {
               triggerHaptic(40);
-              setGoalMinute(currentFixture?.matchClockMinute || 1);
+              setGoalMinute(pitchClock.displayMinute);
               setActiveModal("goal");
             }}
             className={`p-4 rounded-2xl font-black text-sm flex flex-col items-center gap-1 shadow-lg transition ${
@@ -1066,7 +1620,7 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
           <button
             onClick={() => {
               triggerHaptic(40);
-              setCardMinute(currentFixture?.matchClockMinute || 1);
+              setCardMinute(pitchClock.displayMinute);
               setActiveModal("card");
             }}
             className={`p-4 rounded-2xl font-black text-sm flex flex-col items-center gap-1 shadow-lg transition ${
@@ -1080,7 +1634,7 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
           <button
             onClick={() => {
               triggerHaptic(40);
-              setSubMinute(currentFixture?.matchClockMinute || 45);
+              setSubMinute(pitchClock.displayMinute);
               setActiveModal("sub");
             }}
             className={`p-4 rounded-2xl font-black text-sm flex flex-col items-center gap-1 shadow-lg transition ${
@@ -1981,6 +2535,95 @@ export function RefereeConsoleClient({ initialData }: { initialData: RefereeData
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* 1-Tap IFAB Law 7.3 Pitch Pause Reason Modal */}
+      {showPauseModal && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true">
+          <div
+            className={`modal max-w-xl sm:max-w-2xl ${
+              daylightMode ? "bg-white text-black border-4 border-black" : "bg-slate-900 text-white border border-slate-800"
+            }`}
+          >
+            <div className="modal-top">
+              <div className="space-y-1">
+                <p className={`eyebrow ${daylightMode ? "text-neutral-700 font-black" : ""}`}>IFAB Law 7.3 Stoppage Administration</p>
+                <h3 className={`text-lg font-black ${daylightMode ? "text-black" : "text-white"}`}>
+                  Pause Match Clock
+                </h3>
+              </div>
+              <div className="flex items-center gap-3">
+                {/* Live clock timestamp badge */}
+                <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-black tabular-nums ${
+                  daylightMode
+                    ? "bg-neutral-100 text-black border-2 border-black"
+                    : "bg-slate-800 text-emerald-400 border border-slate-700"
+                }`}>
+                  <Clock size={14} className="shrink-0" />
+                  <span>{pitchClock.formattedShort}</span>
+                  {currentFixture?.period && (
+                    <span className={`text-xs font-bold ${daylightMode ? "text-neutral-500" : "text-slate-500"}`}>
+                      · {currentFixture.period === "first_half" ? "1H" : currentFixture.period === "second_half" ? "2H" : currentFixture.period === "extra_time_first" ? "ET1" : currentFixture.period === "extra_time_second" ? "ET2" : currentFixture.period}
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  className={`icon-button ${daylightMode ? "text-black hover:bg-neutral-100" : ""}`}
+                  onClick={() => setShowPauseModal(false)}
+                  aria-label="Close pause modal"
+                >
+                  <X size={19} />
+                </button>
+              </div>
+            </div>
+
+            <div className="modal-body space-y-4">
+              <p className={`text-sm ${daylightMode ? "text-neutral-700 font-bold" : "text-slate-400"}`}>
+                Select the official cause for halting play. The pitch clock will freeze instantly and track the lost time.
+              </p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {(Object.keys(PAUSE_REASONS) as PauseReasonKey[]).map((key) => {
+                  const reason = PAUSE_REASONS[key];
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => handlePauseMatch(key)}
+                      disabled={busy}
+                      className={`p-4 min-h-[68px] rounded-2xl text-left flex items-start gap-3 transition-all border-2 shadow-sm active:scale-[0.975] ${
+                        daylightMode
+                          ? "bg-neutral-50 hover:bg-neutral-100 text-black border-neutral-200 hover:border-black"
+                          : "bg-slate-800/80 hover:bg-slate-800 text-white border-slate-700 hover:border-slate-500"
+                      }`}
+                    >
+                      <span className={`text-2xl shrink-0 mt-0.5 w-10 h-10 flex items-center justify-center rounded-xl border ${reason.color}`}>
+                        {reason.icon}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-black leading-tight">{reason.short}</div>
+                        <div className={`text-xs leading-snug mt-1 ${daylightMode ? "text-neutral-600 font-semibold" : "text-slate-400"}`}>
+                          {reason.label}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className={`button secondary w-full ${daylightMode ? "border-2 border-black text-black font-black" : ""}`}
+                onClick={() => setShowPauseModal(false)}
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}

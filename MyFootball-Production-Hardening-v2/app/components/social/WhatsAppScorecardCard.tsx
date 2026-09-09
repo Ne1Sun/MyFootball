@@ -3,6 +3,7 @@
 import React, { useRef, useState } from "react";
 import { Download, Share2, Sparkles, Trophy, Check, Smartphone } from "lucide-react";
 import { SafeText, getTeamTricode } from "../ui/SafeText";
+import { IndicCanvasRenderer } from "../../lib/indic-canvas";
 
 export interface WhatsAppScorecardProps {
   tournamentName: string;
@@ -75,10 +76,11 @@ export function WhatsAppScorecardCard({
     ctx.textAlign = "center";
     ctx.fillText("🇮🇳 MYFOOTBALL BHARAT", 540, 100);
 
-    // 4. Tournament Title
+    // 4. Tournament Title (Grapheme-safe truncate)
     ctx.fillStyle = "#f59e0b";
     ctx.font = "bold 44px sans-serif";
-    ctx.fillText(tournamentName.toUpperCase(), 540, 190);
+    const truncatedTourney = IndicCanvasRenderer.truncateGraphemes(tournamentName.toUpperCase(), 32);
+    ctx.fillText(truncatedTourney, 540, 190);
 
     ctx.fillStyle = "#94a3b8";
     ctx.font = "500 24px sans-serif";
@@ -99,14 +101,15 @@ export function WhatsAppScorecardCard({
     ctx.roundRect(140, 350, 120, 120, 24);
     ctx.fill();
     ctx.fillStyle = "#090d16";
-    ctx.font = "black 50px sans-serif";
+    ctx.font = "900 50px sans-serif";
     ctx.fillText(getTeamTricode(homeTeamName), 200, 425);
 
-    // Home Team Name
+    // Home Team Name (Grapheme-safe)
     ctx.fillStyle = "#ffffff";
     ctx.font = "bold 36px sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText(homeTeamName.slice(0, 18), 200, 520);
+    const safeHomeName = IndicCanvasRenderer.truncateGraphemes(homeTeamName, 18);
+    ctx.fillText(safeHomeName, 200, 520);
 
     // Score in Center
     ctx.fillStyle = "#ffffff";
@@ -124,19 +127,20 @@ export function WhatsAppScorecardCard({
     ctx.roundRect(820, 350, 120, 120, 24);
     ctx.fill();
     ctx.fillStyle = "#090d16";
-    ctx.font = "black 50px sans-serif";
+    ctx.font = "900 50px sans-serif";
     ctx.fillText(getTeamTricode(awayTeamName), 880, 425);
 
-    // Away Team Name
+    // Away Team Name (Grapheme-safe)
     ctx.fillStyle = "#ffffff";
     ctx.font = "bold 36px sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText(awayTeamName.slice(0, 18), 880, 520);
+    const safeAwayName = IndicCanvasRenderer.truncateGraphemes(awayTeamName, 18);
+    ctx.fillText(safeAwayName, 880, 520);
 
-    // 6. Match Scorers Section
+    // 6. Match Scorers Section (Indic Word-Wrapped & Grapheme Safe)
     ctx.fillStyle = "rgba(30, 41, 59, 0.7)";
     ctx.beginPath();
-    ctx.roundRect(80, 750, 920, 280, 30);
+    ctx.roundRect(80, 750, 920, 290, 30);
     ctx.fill();
     ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
     ctx.stroke();
@@ -144,20 +148,46 @@ export function WhatsAppScorecardCard({
     ctx.fillStyle = "#f59e0b";
     ctx.font = "bold 24px sans-serif";
     ctx.textAlign = "left";
-    ctx.fillText("⚽ MATCH GOALSCORERS", 120, 800);
+    ctx.fillText("⚽ MATCH GOALSCORERS", 120, 795);
 
     ctx.fillStyle = "#e2e8f0";
     ctx.font = "500 24px sans-serif";
-    const homeScorerText = homeScorers.length > 0 ? homeScorers.join(", ") : "No goals";
-    ctx.fillText(`${getTeamTricode(homeTeamName)}: ${homeScorerText}`, 120, 855);
 
-    const awayScorerText = awayScorers.length > 0 ? awayScorers.join(", ") : "No goals";
-    ctx.fillText(`${getTeamTricode(awayTeamName)}: ${awayScorerText}`, 120, 915);
+    // Home Scorers with Grapheme wrapping
+    const homeScorerText = `${getTeamTricode(homeTeamName)}: ${homeScorers.length > 0 ? homeScorers.join(", ") : "No goals"}`;
+    const wrappedHome = IndicCanvasRenderer.wrapIndicText(ctx, homeScorerText, {
+      maxWidth: 840,
+      fontSize: 24,
+      maxLines: 2,
+      lineHeightMultiplier: 1.45,
+    });
+
+    let currentY = 840;
+    for (const line of wrappedHome.lines) {
+      ctx.fillText(line.text, 120, currentY);
+      currentY += 32;
+    }
+
+    // Away Scorers with Grapheme wrapping
+    const awayScorerText = `${getTeamTricode(awayTeamName)}: ${awayScorers.length > 0 ? awayScorers.join(", ") : "No goals"}`;
+    const wrappedAway = IndicCanvasRenderer.wrapIndicText(ctx, awayScorerText, {
+      maxWidth: 840,
+      fontSize: 24,
+      maxLines: 2,
+      lineHeightMultiplier: 1.45,
+    });
+
+    currentY = Math.max(currentY + 8, 915);
+    for (const line of wrappedAway.lines) {
+      ctx.fillText(line.text, 120, currentY);
+      currentY += 32;
+    }
 
     if (playerOfTheMatch) {
       ctx.fillStyle = "#38bdf8";
       ctx.font = "bold 24px sans-serif";
-      ctx.fillText(`⭐ PLAYER OF THE MATCH: ${playerOfTheMatch}`, 120, 980);
+      const safePotm = IndicCanvasRenderer.truncateGraphemes(playerOfTheMatch, 25);
+      ctx.fillText(`⭐ PLAYER OF THE MATCH: ${safePotm}`, 120, Math.min(currentY + 12, 1010));
     }
 
     // 7. Footer Call to Action
@@ -184,11 +214,41 @@ export function WhatsAppScorecardCard({
     }
   };
 
-  const handleWhatsAppShare = () => {
-    const text = encodeURIComponent(
-      `🏆 *${tournamentName}* Match Result!\n⚽ *${homeTeamName} ${homeScore} - ${awayScore} ${awayTeamName}*\n\nView official match sheets & standings on MyFootball Bharat: https://myfootball.in`
-    );
-    window.open(`https://api.whatsapp.com/send?text=${text}`, "_blank");
+  const handleWhatsAppShare = async () => {
+    const shareText = `🏆 *${tournamentName}* Match Result!\n⚽ *${homeTeamName} ${homeScore} - ${awayScore} ${awayTeamName}*\n\nView official match sheets & standings on MyFootball Bharat: https://myfootball.in`;
+
+    // Attempt Web Share API Level 2 (files support)
+    const canvas = generateCanvas();
+    if (typeof navigator !== "undefined" && typeof navigator.share === "function" && typeof navigator.canShare === "function" && canvas.toBlob) {
+      try {
+        const blob = await new Promise<Blob | null>((resolve) =>
+          canvas.toBlob(resolve, "image/png")
+        );
+        if (blob) {
+          const file = new File(
+            [blob],
+            `match-${getTeamTricode(homeTeamName)}-vs-${getTeamTricode(awayTeamName)}.png`,
+            { type: "image/png" }
+          );
+          if (navigator.canShare({ files: [file] })) {
+            await navigator.share({
+              title: `${tournamentName} Scorecard`,
+              text: shareText,
+              files: [file],
+            });
+            setShared(true);
+            setTimeout(() => setShared(false), 3000);
+            return;
+          }
+        }
+      } catch (err) {
+        if ((err as Error).name === "AbortError") return;
+      }
+    }
+
+    // Universal WhatsApp deep link fallback
+    const encoded = encodeURIComponent(shareText);
+    window.open(`https://api.whatsapp.com/send?text=${encoded}`, "_blank");
     setShared(true);
     setTimeout(() => setShared(false), 3000);
   };
@@ -202,7 +262,7 @@ export function WhatsAppScorecardCard({
           </div>
           <div>
             <h4 className="text-sm font-black text-white">WhatsApp & Story Poster</h4>
-            <p className="text-[11px] text-slate-400">Generate high-res match card for team groups</p>
+            <p className="text-[11px] text-slate-400">Indic-safe high-res match card with 1-tap WhatsApp Share</p>
           </div>
         </div>
       </div>
@@ -222,7 +282,7 @@ export function WhatsAppScorecardCard({
           className="interactive-button flex-1 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-2 transition shadow-lg shadow-emerald-600/20"
         >
           {shared ? <Check size={14} /> : <Share2 size={14} />}
-          {shared ? "Opened WhatsApp!" : "Share on WhatsApp"}
+          {shared ? "Shared!" : "Share on WhatsApp / Story"}
         </button>
       </div>
 

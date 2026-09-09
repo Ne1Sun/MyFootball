@@ -90,12 +90,14 @@ export function KnockoutBracket({
   fixtures,
   onSaveAction,
   onOpenMatchday,
+  readOnly = false,
 }: {
   divisions: Division[];
   entries: Entry[];
   fixtures: Fixture[];
-  onSaveAction: (payload: Record<string, unknown>) => Promise<void>;
-  onOpenMatchday: (fixtureId: string) => void;
+  onSaveAction?: (payload: Record<string, unknown>) => Promise<void>;
+  onOpenMatchday?: (fixtureId: string) => void;
+  readOnly?: boolean;
 }) {
   const [selectedDivisionId, setSelectedDivisionId] = useState<string>(divisions[0]?.id || "");
   const [busy, setBusy] = useState(false);
@@ -115,6 +117,7 @@ export function KnockoutBracket({
   const bracketStages = useMemo(() => {
     if (knockoutFixtures.length === 0) return [];
 
+    const r64: Fixture[] = [];
     const r32: Fixture[] = [];
     const r16: Fixture[] = [];
     const qf: Fixture[] = [];
@@ -127,7 +130,9 @@ export function KnockoutBracket({
       const bRound = (f.bracketRound || "").toLowerCase();
       const rName = (f.roundName || "").toLowerCase();
 
-      if (bRound === "round_of_32" || bRound === "r32" || rName.includes("round of 32") || rName.includes("r32")) {
+      if (bRound === "round_of_64" || bRound === "r64" || rName.includes("round of 64") || rName.includes("r64")) {
+        r64.push(f);
+      } else if (bRound === "round_of_32" || bRound === "r32" || rName.includes("round of 32") || rName.includes("r32")) {
         r32.push(f);
       } else if (bRound === "round_of_16" || bRound === "r16" || rName.includes("round of 16") || rName.includes("r16")) {
         r16.push(f);
@@ -160,13 +165,24 @@ export function KnockoutBracket({
 
     const stages: KnockoutRoundStage[] = [];
 
+    // Round of 64 (64 teams -> 32 matches)
+    if (r64.length > 0) {
+      stages.push({
+        id: "round_of_64",
+        title: "Round of 64",
+        shortTitle: "R64",
+        order: 1,
+        fixtures: r64.sort((a, b) => (a.bracketMatchIndex ?? 0) - (b.bracketMatchIndex ?? 0)),
+      });
+    }
+
     // Round of 32 (32 teams -> 16 matches)
     if (r32.length > 0) {
       stages.push({
         id: "round_of_32",
         title: "Round of 32",
         shortTitle: "R32",
-        order: 1,
+        order: 2,
         fixtures: r32.sort((a, b) => (a.bracketMatchIndex ?? 0) - (b.bracketMatchIndex ?? 0)),
       });
     }
@@ -177,7 +193,7 @@ export function KnockoutBracket({
         id: "round_of_16",
         title: "Round of 16",
         shortTitle: "R16",
-        order: 2,
+        order: 3,
         fixtures: r16.sort((a, b) => (a.bracketMatchIndex ?? 0) - (b.bracketMatchIndex ?? 0)),
       });
     }
@@ -188,7 +204,7 @@ export function KnockoutBracket({
         id: "quarter_final",
         title: "Quarter-Finals",
         shortTitle: "Quarters",
-        order: 3,
+        order: 4,
         fixtures: qf.sort((a, b) => (a.bracketMatchIndex ?? 0) - (b.bracketMatchIndex ?? 0)),
       });
     }
@@ -199,7 +215,7 @@ export function KnockoutBracket({
         id: "semi_final",
         title: "Semi-Finals",
         shortTitle: "Semis",
-        order: 4,
+        order: 5,
         fixtures: sf.sort((a, b) => (a.bracketMatchIndex ?? 0) - (b.bracketMatchIndex ?? 0)),
       });
     }
@@ -209,9 +225,9 @@ export function KnockoutBracket({
     if (champFixtures.length > 0) {
       stages.push({
         id: "championship",
-        title: "Championship Matches",
+        title: "Finals",
         shortTitle: "Finals",
-        order: 5,
+        order: 6,
         fixtures: champFixtures,
         isChampionship: true,
       });
@@ -233,6 +249,7 @@ export function KnockoutBracket({
   }, [knockoutFixtures]);
 
   const handleAdvanceWinner = async (fixture: Fixture, winningEntryId: string, losingEntryId: string) => {
+    if (!onSaveAction) return;
     const winner = entries.find((e) => e.id === winningEntryId);
     const winnerName = winner?.teamName || "Selected Team";
     if (!confirm(`Confirm ${winnerName} as the winner and advance them to the next bracket round?`)) return;
@@ -374,31 +391,61 @@ export function KnockoutBracket({
 
         {/* Action Controls */}
         <div className="mt-3 pt-2.5 border-t border-border/60 flex items-center justify-between gap-2">
-          <button
-            onClick={() => onOpenMatchday(fixture.id)}
-            className="text-xs font-semibold text-primary hover:underline inline-flex items-center gap-1 min-h-[32px]"
-          >
-            <Play size={12} fill="currentColor" /> Open Match Center
-          </button>
+          {onOpenMatchday ? (
+            <button
+              onClick={() => onOpenMatchday(fixture.id)}
+              className="text-xs font-semibold text-primary hover:underline inline-flex items-center gap-1 min-h-[32px]"
+            >
+              <Play size={12} fill="currentColor" /> Open Match Center
+            </button>
+          ) : (
+            <span />
+          )}
 
-          {!isCompleted && home && away && (
+          {readOnly && home && away && isCompleted && (
             <div className="flex items-center gap-1.5">
-              <button
-                onClick={() => handleAdvanceWinner(fixture, home.id, away.id)}
-                disabled={busy}
-                title={`Advance ${home.teamName}`}
-                className="text-[11px] px-2.5 py-1 rounded-lg bg-muted hover:bg-emerald-500/20 hover:text-emerald-600 font-bold transition flex items-center gap-1 border border-border min-h-[32px]"
-              >
-                <span>Adv {homeTricode}</span>
-              </button>
-              <button
-                onClick={() => handleAdvanceWinner(fixture, away.id, home.id)}
-                disabled={busy}
-                title={`Advance ${away.teamName}`}
-                className="text-[11px] px-2.5 py-1 rounded-lg bg-muted hover:bg-emerald-500/20 hover:text-emerald-600 font-bold transition flex items-center gap-1 border border-border min-h-[32px]"
-              >
-                <span>Adv {awayTricode}</span>
-              </button>
+              <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-bold border border-emerald-500/30">
+                ✓ {homeWon ? homeTricode : awayWon ? awayTricode : (fixture.homeScore > fixture.awayScore ? homeTricode : awayTricode)} Advanced
+              </span>
+            </div>
+          )}
+
+          {!readOnly && onSaveAction && home && away && (
+            <div className="flex items-center gap-1.5">
+              {isCompleted ? (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-bold border border-emerald-500/30">
+                    ✓ {homeWon ? homeTricode : awayWon ? awayTricode : (fixture.homeScore > fixture.awayScore ? homeTricode : awayTricode)} Advanced
+                  </span>
+                  <button
+                    onClick={() => handleAdvanceWinner(fixture, homeWon ? home.id : away.id, homeWon ? away.id : home.id)}
+                    disabled={busy}
+                    title="Director override: Re-advance winner"
+                    className="text-[10px] px-2 py-0.5 rounded-md bg-muted hover:bg-muted/80 text-muted-foreground font-semibold border border-border transition"
+                  >
+                    Override
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <button
+                    onClick={() => handleAdvanceWinner(fixture, home.id, away.id)}
+                    disabled={busy}
+                    title={`Advance ${home.teamName}`}
+                    className="text-[11px] px-2.5 py-1 rounded-lg bg-muted hover:bg-emerald-500/20 hover:text-emerald-600 font-bold transition flex items-center gap-1 border border-border min-h-[32px]"
+                  >
+                    <span>Adv {homeTricode}</span>
+                  </button>
+                  <button
+                    onClick={() => handleAdvanceWinner(fixture, away.id, home.id)}
+                    disabled={busy}
+                    title={`Advance ${away.teamName}`}
+                    className="text-[11px] px-2.5 py-1 rounded-lg bg-muted hover:bg-emerald-500/20 hover:text-emerald-600 font-bold transition flex items-center gap-1 border border-border min-h-[32px]"
+                  >
+                    <span>Adv {awayTricode}</span>
+                  </button>
+                </>
+              )}
             </div>
           )}
         </div>

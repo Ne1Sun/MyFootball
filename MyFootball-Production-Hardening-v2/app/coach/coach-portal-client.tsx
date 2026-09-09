@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   AlertCircle,
   ArrowLeft,
@@ -11,6 +12,7 @@ import {
   ChevronRight,
   CircleDot,
   Clock,
+  Compass,
   Crown,
   ExternalLink,
   LoaderCircle,
@@ -18,6 +20,7 @@ import {
   Plus,
   Shield,
   ShieldCheck,
+  Sparkles,
   Swords,
   Trash2,
   Trophy,
@@ -31,7 +34,7 @@ import {
 } from "lucide-react";
 import ThemeToggle from "../theme-toggle";
 import type { Division, Entry, Fixture, MatchEvent, Player, SquadMember, Tournament } from "../components/types";
-import { TacticalPitch } from "../components/tactics/TacticalPitch";
+import { TacticalPitch, type Formation } from "../components/tactics/TacticalPitch";
 import { AppHeader } from "../components/layout/AppHeader";
 import { AppFooter } from "../components/layout/AppFooter";
 
@@ -77,6 +80,7 @@ export function CoachPortalClient({ initialData }: { initialData: CoachPortalDat
   const [showAddPlayer, setShowAddPlayer] = useState(false);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState("");
+  const [formation, setFormation] = useState<Formation>("4-3-3");
 
   const activeClub = data.clubs.find((c) => c.id === selectedClubId) || data.clubs[0];
 
@@ -172,16 +176,51 @@ export function CoachPortalClient({ initialData }: { initialData: CoachPortalDat
 
   const handleToggleStarting = async (playerId: string, currentStarting: boolean) => {
     if (!activeEntry) return;
+    if (!currentStarting && startingLineup.length >= 11) {
+      setToast("Starting XI is full (11/11). Please bench a player before starting another.");
+      setTimeout(() => setToast(""), 4000);
+      return;
+    }
     setBusy(true);
     const updatedSquad = entrySquad.map((sm) => {
       if (sm.playerId === playerId) return { ...sm, isStarting: !currentStarting };
       return sm;
     });
-    await fetch("/api/app", {
+    const res = await fetch("/api/app", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "updateSquad", entryId: activeEntry.id, squad: updatedSquad }),
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      setToast(err.error || "Failed to update lineup");
+      setTimeout(() => setToast(""), 4000);
+    }
+    await refreshData();
+    setBusy(false);
+  };
+
+  const handleSwapPlayers = async (pitchPlayerId: string, benchPlayerId: string) => {
+    if (!activeEntry) return;
+    setBusy(true);
+    const updatedSquad = entrySquad.map((sm) => {
+      if (sm.playerId === pitchPlayerId) return { ...sm, isStarting: false };
+      if (sm.playerId === benchPlayerId) return { ...sm, isStarting: true };
+      return sm;
+    });
+    const res = await fetch("/api/app", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "updateSquad", entryId: activeEntry.id, squad: updatedSquad }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      setToast(err.error || "Failed to swap players");
+      setTimeout(() => setToast(""), 4000);
+    } else {
+      setToast("Players swapped successfully");
+      setTimeout(() => setToast(""), 3000);
+    }
     await refreshData();
     setBusy(false);
   };
@@ -193,11 +232,19 @@ export function CoachPortalClient({ initialData }: { initialData: CoachPortalDat
       ...entrySquad,
       { playerId, isStarting: entrySquad.length < 11, jerseyNumber: null, position: null },
     ];
-    await fetch("/api/app", {
+    const res = await fetch("/api/app", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "updateSquad", entryId: activeEntry.id, squad: updatedSquad }),
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      setToast(err.error || "Failed to add player to squad");
+      setTimeout(() => setToast(""), 4000);
+    } else {
+      setToast("Player added to squad");
+      setTimeout(() => setToast(""), 3000);
+    }
     await refreshData();
     setBusy(false);
   };
@@ -206,11 +253,19 @@ export function CoachPortalClient({ initialData }: { initialData: CoachPortalDat
     if (!activeEntry) return;
     setBusy(true);
     const updatedSquad = entrySquad.filter((sm) => sm.playerId !== playerId);
-    await fetch("/api/app", {
+    const res = await fetch("/api/app", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "updateSquad", entryId: activeEntry.id, squad: updatedSquad }),
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      setToast(err.error || "Failed to remove player");
+      setTimeout(() => setToast(""), 4000);
+    } else {
+      setToast("Player removed from squad");
+      setTimeout(() => setToast(""), 3000);
+    }
     await refreshData();
     setBusy(false);
   };
@@ -316,6 +371,12 @@ export function CoachPortalClient({ initialData }: { initialData: CoachPortalDat
           >
             <Trophy size={15} /> Tournament Entries ({clubEntries.length})
           </button>
+          <Link
+            href="/discover"
+            className="interactive-button px-4 py-2 rounded-xl text-xs font-black transition flex items-center gap-1.5 ml-auto bg-gradient-to-r from-emerald-500 to-amber-500 text-slate-950 shadow-md hover:opacity-95"
+          >
+            <Sparkles size={14} /> Discover & Enroll Squads
+          </Link>
         </div>
 
         {/* TAB 1: CLUB PLAYER ROSTER */}
@@ -425,9 +486,11 @@ export function CoachPortalClient({ initialData }: { initialData: CoachPortalDat
                 startingPlayers={startingLineup}
                 benchPlayers={substitutes}
                 teamName={activeEntry?.teamName}
+                formation={formation}
+                onFormationChange={setFormation}
+                isInteractive={!busy}
                 onSwapPlayer={(pitchId, benchId) => {
-                  void handleToggleStarting(pitchId, true);
-                  void handleToggleStarting(benchId, false);
+                  void handleSwapPlayers(pitchId, benchId);
                 }}
                 onBenchPlayer={(pitchId) => {
                   void handleToggleStarting(pitchId, true);
@@ -438,9 +501,19 @@ export function CoachPortalClient({ initialData }: { initialData: CoachPortalDat
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               {/* Starting XI */}
               <div className="panel-card p-5 rounded-2xl bg-card border border-border space-y-3">
-                <h4 className="font-extrabold text-sm text-foreground flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" /> Starting XI ({startingLineup.length})
-                </h4>
+                <div className="flex items-center justify-between">
+                  <h4 className="font-extrabold text-sm text-foreground flex items-center gap-2">
+                    <span className={`w-2.5 h-2.5 rounded-full ${startingLineup.length === 11 ? "bg-emerald-500" : "bg-amber-500"}`} />
+                    Starting XI ({startingLineup.length}/11)
+                  </h4>
+                  <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
+                    startingLineup.length === 11
+                      ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                      : "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                  }`}>
+                    {startingLineup.length === 11 ? "Squad Complete" : `Pick ${11 - startingLineup.length} more`}
+                  </span>
+                </div>
                 {startingLineup.map((p) => (
                   <div key={p.id} className="interactive-row flex items-center justify-between p-2.5 rounded-xl bg-muted/40 border border-border text-xs">
                     <div className="flex items-center gap-2">
@@ -476,7 +549,13 @@ export function CoachPortalClient({ initialData }: { initialData: CoachPortalDat
                     </div>
                     <button
                       onClick={() => handleToggleStarting(p.id, false)}
-                      className="interactive-button text-[11px] px-2 py-1 rounded bg-emerald-500/15 text-emerald-600 font-medium"
+                      disabled={startingLineup.length >= 11 || busy}
+                      title={startingLineup.length >= 11 ? "Starting XI is full (11/11)" : "Promote to Starting XI"}
+                      className={`interactive-button text-[11px] px-2.5 py-1 rounded font-medium transition ${
+                        startingLineup.length >= 11
+                          ? "opacity-50 cursor-not-allowed bg-muted text-muted-foreground"
+                          : "bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-600 dark:text-emerald-400"
+                      }`}
                     >
                       Start
                     </button>
@@ -515,28 +594,74 @@ export function CoachPortalClient({ initialData }: { initialData: CoachPortalDat
 
         {/* TAB 4: TOURNAMENTS */}
         {activeTab === "tournaments" && (
-          <div className="cascade-3 space-y-4">
-            <h3 className="font-extrabold text-lg text-foreground">Tournament Registrations</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {clubEntries.map((entry) => {
-                const div = data.divisions.find((d) => d.id === entry.divisionId);
-                const tourney = data.tournaments.find((t) => t.id === div?.tournamentId);
-                return (
-                  <div key={entry.id} className="interactive-card panel-card p-5 rounded-2xl bg-card border border-border space-y-3 shadow-sm">
-                    <div className="flex items-center justify-between">
-                      <span className="px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-600 text-xs font-bold uppercase">
-                        {entry.status}
-                      </span>
-                      <span className="text-xs text-muted-foreground">Payment: {entry.paymentStatus}</span>
-                    </div>
-                    <div>
-                      <h4 className="font-extrabold text-base text-foreground">{tourney?.name}</h4>
-                      <p className="text-xs text-muted-foreground">{div?.name} • Assigned: {entry.groupName}</p>
-                    </div>
-                  </div>
-                );
-              })}
+          <div className="cascade-3 space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 className="font-extrabold text-lg text-foreground">Squad Tournament Registrations</h3>
+                <p className="text-xs text-muted-foreground">Track participation, entry approvals, and fee payment status</p>
+              </div>
+              <Link
+                href="/discover"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-amber-500 text-slate-950 font-black text-xs shadow-md hover:opacity-95 transition self-start"
+              >
+                <Compass size={15} /> Explore Tournaments & Enroll Squad
+              </Link>
             </div>
+
+            {clubEntries.length === 0 ? (
+              <div className="p-8 rounded-2xl bg-card border border-border text-center space-y-3">
+                <Trophy size={36} className="text-muted-foreground mx-auto" />
+                <h4 className="text-sm font-bold text-foreground">No Tournament Registrations Yet</h4>
+                <p className="text-xs text-muted-foreground max-w-sm mx-auto">
+                  Your club has not entered any competitions yet. Browse open grassroots and youth tournaments to enroll your squad.
+                </p>
+                <Link
+                  href="/discover"
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-bold shadow-sm hover:opacity-90 transition"
+                >
+                  <Compass size={14} /> Browse Available Tournaments
+                </Link>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {clubEntries.map((entry) => {
+                  const div = data.divisions.find((d) => d.id === entry.divisionId);
+                  const tourney = data.tournaments.find((t) => t.id === div?.tournamentId);
+                  return (
+                    <div key={entry.id} className="interactive-card panel-card p-5 rounded-2xl bg-card border border-border space-y-3 shadow-sm">
+                      <div className="flex items-center justify-between">
+                        <span className="px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-600 text-xs font-bold uppercase">
+                          {entry.status}
+                        </span>
+                        <span className="text-xs text-muted-foreground">Payment: {entry.paymentStatus}</span>
+                      </div>
+                      <div>
+                        <h4 className="font-extrabold text-base text-foreground">{tourney?.name}</h4>
+                        <p className="text-xs text-muted-foreground">{div?.name} • Assigned: {entry.groupName}</p>
+                      </div>
+                      {tourney && (
+                        <div className="pt-2 border-t border-border flex items-center justify-between">
+                          <Link
+                            href={`/tournament/${tourney.id}`}
+                            className="text-xs font-bold text-amber-500 hover:underline flex items-center gap-1"
+                          >
+                            <span>View Tournament Hub</span>
+                            <ExternalLink size={12} />
+                          </Link>
+                          <Link
+                            href={`/register/${tourney.id}`}
+                            className="text-xs font-bold text-emerald-500 hover:underline flex items-center gap-1"
+                          >
+                            <span>Enroll Another Team</span>
+                            <Plus size={12} />
+                          </Link>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
       </main>

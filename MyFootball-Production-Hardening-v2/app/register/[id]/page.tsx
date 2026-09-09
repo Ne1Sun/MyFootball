@@ -48,6 +48,16 @@ type Division = {
   feeBasis: string;
 };
 
+type CoachClub = {
+  id: string;
+  name: string;
+  city: string | null;
+  organizationType: string | null;
+  contactName: string | null;
+  contactPhone: string | null;
+  teams: Array<{ id: string; name: string }>;
+};
+
 export default function RegisterPage({
   params,
 }: {
@@ -57,6 +67,17 @@ export default function RegisterPage({
   const [tournament, setTournament] = useState<Tournament>();
   const [divisions, setDivisions] = useState<Division[]>([]);
   const [selectedDivisionId, setSelectedDivisionId] = useState<string>("");
+  const [myClubs, setMyClubs] = useState<CoachClub[]>([]);
+  const [currentUser, setCurrentUser] = useState<{ email: string; displayName: string; role?: string } | null>(null);
+  const [formData, setFormData] = useState({
+    clubName: "",
+    teamName: "",
+    organizationType: "academy",
+    city: "",
+    contactName: "",
+    contactPhone: "",
+    notes: "",
+  });
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -70,8 +91,31 @@ export default function RegisterPage({
         if (!response.ok) throw new Error(body.error);
         setTournament(body.tournament);
         setDivisions(body.divisions || []);
+        const loadedClubs = (body.myClubs || []) as CoachClub[];
+        setMyClubs(loadedClubs);
+        setCurrentUser(body.user || null);
+
         if (body.divisions?.length) {
           setSelectedDivisionId(body.divisions[0].id);
+        }
+
+        if (loadedClubs.length > 0) {
+          const firstClub = loadedClubs[0];
+          const firstTeam = firstClub.teams?.[0];
+          setFormData((prev) => ({
+            ...prev,
+            clubName: firstClub.name || "",
+            teamName: firstTeam?.name || "",
+            organizationType: firstClub.organizationType || "academy",
+            city: firstClub.city || "",
+            contactName: firstClub.contactName || body.user?.displayName || "",
+            contactPhone: firstClub.contactPhone || "",
+          }));
+        } else if (body.user) {
+          setFormData((prev) => ({
+            ...prev,
+            contactName: body.user.displayName || "",
+          }));
         }
       })
       .catch((reason) =>
@@ -173,10 +217,93 @@ export default function RegisterPage({
     );
   }
 
+  if (!currentUser) {
+    return (
+      <main className="min-h-screen bg-background text-foreground flex items-center justify-center p-4">
+        <div className="max-w-md p-8 rounded-3xl bg-card border border-border text-center space-y-5 shadow-2xl">
+          <div className="w-16 h-16 rounded-3xl bg-amber-500/15 text-amber-500 border border-amber-500/30 flex items-center justify-center mx-auto shadow-lg">
+            <Shield size={32} />
+          </div>
+          <div className="space-y-1.5">
+            <span className="text-[11px] uppercase font-extrabold px-3 py-1 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30">
+              Coach Authentication Required
+            </span>
+            <h1 className="text-2xl font-black pt-1">Sign In as Coach</h1>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Grassroots tournament team enrollments are restricted exclusively to Academy Head Coaches and Team Managers. Please sign in or register with a Coach account.
+            </p>
+          </div>
+          <div className="pt-2 flex flex-col gap-2.5">
+            <Link
+              href={`/login?return_to=${encodeURIComponent(`/register/${id}`)}`}
+              className="py-3 px-4 rounded-xl font-extrabold text-xs bg-primary text-primary-foreground shadow-sm hover:opacity-95 transition flex items-center justify-center gap-2"
+            >
+              <ShieldCheck size={16} /> Sign In or Register as Coach
+            </Link>
+            <Link
+              href={`/tournament/${id}`}
+              className="py-2.5 px-4 rounded-xl font-bold text-xs bg-muted text-foreground hover:bg-muted/80 transition"
+            >
+              Back to Tournament Overview
+            </Link>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  if (currentUser.role !== "coach") {
+    return (
+      <main className="min-h-screen bg-background text-foreground flex items-center justify-center p-4">
+        <div className="max-w-md p-8 rounded-3xl bg-card border border-rose-500/30 text-center space-y-5 shadow-2xl">
+          <div className="w-16 h-16 rounded-3xl bg-rose-500/15 text-rose-500 border border-rose-500/30 flex items-center justify-center mx-auto shadow-lg">
+            <Shield size={32} />
+          </div>
+          <div className="space-y-1.5">
+            <span className="text-[11px] uppercase font-extrabold px-3 py-1 rounded-full bg-rose-500/15 text-rose-600 dark:text-rose-400 border border-rose-500/30">
+              Coach Role Gatekeeper
+            </span>
+            <h1 className="text-2xl font-black pt-1">Coach Role Required</h1>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              You are currently signed in as <strong className="text-foreground">{currentUser.displayName}</strong> with the active role of{" "}
+              <span className="uppercase font-extrabold px-1.5 py-0.5 rounded bg-muted border border-border text-foreground">
+                {currentUser.role}
+              </span>.
+            </p>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              To enroll a team into <strong>{tournament?.name}</strong>, you must be in the <strong>Coach</strong> role. Please switch your active session or log in as Coach.
+            </p>
+          </div>
+
+          <div className="pt-2 flex flex-col gap-2.5">
+            <a
+              href={`/signin-with-chatgpt?email=${encodeURIComponent(currentUser.email)}&role=coach&return_to=${encodeURIComponent(`/register/${id}`)}`}
+              className="py-3 px-4 rounded-xl font-black text-xs bg-gradient-to-r from-emerald-500 to-amber-500 text-slate-950 shadow-md hover:opacity-95 transition flex items-center justify-center gap-2"
+            >
+              <ShieldCheck size={16} /> Switch Active Session to Coach
+            </a>
+            <a
+              href={`/signout-with-chatgpt?return_to=${encodeURIComponent(`/login?return_to=/register/${id}`)}`}
+              className="py-2.5 px-4 rounded-xl font-bold text-xs bg-muted border border-border text-foreground hover:bg-muted/80 transition flex items-center justify-center gap-2"
+            >
+              Log Off & Re-login with Another Account
+            </a>
+            <Link
+              href="/discover"
+              className="text-xs text-muted-foreground hover:text-foreground font-medium pt-1"
+            >
+              Return to Tournament Discovery
+            </Link>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col font-sans selection:bg-amber-500 selection:text-slate-950">
       {/* Unified App Header */}
-      <AppHeader activeRoute="register" />
+      <AppHeader activeRoute="register" user={currentUser} />
 
       {/* Main Registration Layout */}
       <main className="flex-1 max-w-5xl w-full mx-auto p-4 lg:p-8 grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -281,12 +408,68 @@ export default function RegisterPage({
               </div>
             </div>
 
+            {/* Coach Quick-Select Verified Squad */}
+            {myClubs.length > 0 && (
+              <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 space-y-2.5">
+                <div className="flex items-center gap-2 text-xs font-bold text-amber-500">
+                  <ShieldCheck size={16} />
+                  <span>Coach Verified Squad Quick-Select</span>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Select an existing squad from your academy to auto-fill registration:
+                </p>
+                <select
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === "new") {
+                      setFormData({
+                        clubName: "",
+                        teamName: "",
+                        organizationType: "academy",
+                        city: "",
+                        contactName: currentUser?.displayName || "",
+                        contactPhone: "",
+                        notes: "",
+                      });
+                      return;
+                    }
+                    const [cId, tId] = val.split("::");
+                    const c = myClubs.find((item) => item.id === cId);
+                    const t = c?.teams.find((item) => item.id === tId);
+                    if (c) {
+                      setFormData((prev) => ({
+                        ...prev,
+                        clubName: c.name,
+                        teamName: t?.name || "",
+                        organizationType: c.organizationType || "academy",
+                        city: c.city || "",
+                        contactName: c.contactName || currentUser?.displayName || "",
+                        contactPhone: c.contactPhone || "",
+                      }));
+                    }
+                  }}
+                  className="w-full bg-card border border-border text-foreground text-xs p-2.5 rounded-xl font-medium focus:border-amber-500 focus:outline-none"
+                >
+                  {myClubs.flatMap((c) =>
+                    c.teams.map((t) => (
+                      <option key={`${c.id}::${t.id}`} value={`${c.id}::${t.id}`}>
+                        {c.name} ({c.city || "Club"}) — {t.name}
+                      </option>
+                    )),
+                  )}
+                  <option value="new">+ Register Another Club / Squad</option>
+                </select>
+              </div>
+            )}
+
             {/* Club & Team Fields */}
             <div className="cascade-3 grid grid-cols-1 sm:grid-cols-2 gap-4">
               <label className="space-y-1 block">
                 <span className="text-xs font-bold text-foreground">Club / Academy Name *</span>
                 <input
                   name="clubName"
+                  value={formData.clubName}
+                  onChange={(e) => setFormData({ ...formData, clubName: e.target.value })}
                   placeholder="e.g. Reliance Foundation Youth"
                   required
                   className="w-full bg-muted/60 border border-border text-foreground text-xs p-3 rounded-xl focus:border-amber-500 focus:outline-none"
@@ -297,6 +480,8 @@ export default function RegisterPage({
                 <span className="text-xs font-bold text-foreground">Team Name *</span>
                 <input
                   name="teamName"
+                  value={formData.teamName}
+                  onChange={(e) => setFormData({ ...formData, teamName: e.target.value })}
                   placeholder="e.g. RFYC U17"
                   required
                   className="w-full bg-muted/60 border border-border text-foreground text-xs p-3 rounded-xl focus:border-amber-500 focus:outline-none"
@@ -307,7 +492,8 @@ export default function RegisterPage({
                 <span className="text-xs font-bold text-foreground">Organization Type</span>
                 <select
                   name="organizationType"
-                  defaultValue="academy"
+                  value={formData.organizationType}
+                  onChange={(e) => setFormData({ ...formData, organizationType: e.target.value })}
                   className="w-full bg-muted/60 border border-border text-foreground text-xs p-3 rounded-xl focus:border-amber-500 focus:outline-none cursor-pointer"
                 >
                   <option value="academy">Professional Academy</option>
@@ -321,6 +507,8 @@ export default function RegisterPage({
                 <span className="text-xs font-bold text-foreground">City / District *</span>
                 <input
                   name="city"
+                  value={formData.city}
+                  onChange={(e) => setFormData({ ...formData, city: e.target.value })}
                   placeholder="e.g. Mumbai"
                   required
                   className="w-full bg-muted/60 border border-border text-foreground text-xs p-3 rounded-xl focus:border-amber-500 focus:outline-none"
@@ -331,6 +519,8 @@ export default function RegisterPage({
                 <span className="text-xs font-bold text-foreground">Head Coach / Manager Name *</span>
                 <input
                   name="contactName"
+                  value={formData.contactName}
+                  onChange={(e) => setFormData({ ...formData, contactName: e.target.value })}
                   placeholder="e.g. Sunil Fernandes"
                   required
                   className="w-full bg-muted/60 border border-border text-foreground text-xs p-3 rounded-xl focus:border-amber-500 focus:outline-none"
@@ -342,6 +532,8 @@ export default function RegisterPage({
                 <input
                   name="contactPhone"
                   type="tel"
+                  value={formData.contactPhone}
+                  onChange={(e) => setFormData({ ...formData, contactPhone: e.target.value })}
                   placeholder="e.g. +91 98200 12345"
                   required
                   className="w-full bg-muted/60 border border-border text-foreground text-xs p-3 rounded-xl focus:border-amber-500 focus:outline-none font-mono"
@@ -353,6 +545,8 @@ export default function RegisterPage({
               <span className="text-xs font-bold text-foreground">Notes / Squad Requirements (Optional)</span>
               <textarea
                 name="notes"
+                value={formData.notes}
+                onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
                 rows={2}
                 maxLength={500}
                 placeholder="Kit colors, arrival notes, or division inquiries..."

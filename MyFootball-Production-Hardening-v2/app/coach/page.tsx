@@ -10,8 +10,10 @@ import {
   squadMembers,
   teams,
   tournaments,
+  users,
 } from "../../db/schema";
 import { requireChatGPTUser } from "../chatgpt-auth";
+import { RoleGateCard } from "../components/auth/RoleGateCard";
 import { CoachPortalClient } from "./coach-portal-client";
 
 export const dynamic = "force-dynamic";
@@ -19,6 +21,26 @@ export const dynamic = "force-dynamic";
 export default async function CoachPage() {
   const user = await requireChatGPTUser("/coach");
   const db = getDb();
+
+  const [profile] = await db
+    .select({ role: users.role })
+    .from(users)
+    .where(eq(users.email, user.email))
+    .limit(1);
+
+  const effectiveRole = profile?.role || user.role || "fan";
+
+  // Strict RBAC Guard: Only coaches can access the coach tactical portal
+  if (effectiveRole !== "coach") {
+    return (
+      <RoleGateCard
+        requiredRole="coach"
+        currentRole={effectiveRole}
+        userEmail={user.email}
+        userName={user.displayName || user.fullName || "Coach"}
+      />
+    );
+  }
 
   // Load all clubs in database (for local demo, allow full interaction with RFYC, Minerva, etc.)
   const clubRows = await db.select().from(clubs).orderBy(asc(clubs.name));

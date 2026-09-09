@@ -106,7 +106,13 @@ export function LeaderboardsView({
 
       if (homeEntry) {
         const key = homeEntry.id;
-        const existing = map.get(key) || { gkName: homeEntry.teamName + " GK", teamName: homeEntry.teamName, cleanSheets: 0, conceded: 0 };
+        const gk = players.find((p) => p.clubId === homeEntry.clubId && p.position === "GK") || players.find((p) => p.position === "GK");
+        const existing = map.get(key) || {
+          gkName: gk ? `#${gk.jerseyNumber} ${gk.name}` : `${homeEntry.teamName} Goalkeeper`,
+          teamName: homeEntry.teamName,
+          cleanSheets: 0,
+          conceded: 0,
+        };
         existing.conceded += f.awayScore;
         if (f.awayScore === 0) existing.cleanSheets += 1;
         map.set(key, existing);
@@ -114,7 +120,13 @@ export function LeaderboardsView({
 
       if (awayEntry) {
         const key = awayEntry.id;
-        const existing = map.get(key) || { gkName: awayEntry.teamName + " GK", teamName: awayEntry.teamName, cleanSheets: 0, conceded: 0 };
+        const gk = players.find((p) => p.clubId === awayEntry.clubId && p.position === "GK") || players.find((p) => p.position === "GK");
+        const existing = map.get(key) || {
+          gkName: gk ? `#${gk.jerseyNumber} ${gk.name}` : `${awayEntry.teamName} Goalkeeper`,
+          teamName: awayEntry.teamName,
+          cleanSheets: 0,
+          conceded: 0,
+        };
         existing.conceded += f.homeScore;
         if (f.homeScore === 0) existing.cleanSheets += 1;
         map.set(key, existing);
@@ -122,7 +134,7 @@ export function LeaderboardsView({
     });
 
     return [...map.values()].sort((a, b) => b.cleanSheets - a.cleanSheets || a.conceded - b.conceded);
-  }, [divisionFixtures, entries]);
+  }, [divisionFixtures, entries, players]);
 
   // --- 4. Fair Play & Discipline ---
   const disciplineRanking = useMemo(() => {
@@ -369,7 +381,10 @@ export function LeaderboardsView({
                   {cleanSheets.map((item, index) => (
                     <tr key={index} className="hover:bg-muted/30 transition">
                       <td className="py-3 px-3 font-mono font-bold text-muted-foreground">{index + 1}</td>
-                      <td className="py-3 px-3 font-bold text-foreground">{item.teamName}</td>
+                      <td className="py-3 px-3">
+                        <div className="font-bold text-foreground">{item.gkName}</div>
+                        <div className="text-xs text-muted-foreground">{item.teamName}</div>
+                      </td>
                       <td className="py-3 px-3 text-right font-mono text-muted-foreground">{item.conceded}</td>
                       <td className="py-3 px-3 text-right font-mono font-black text-emerald-500 text-base">
                         {item.cleanSheets}

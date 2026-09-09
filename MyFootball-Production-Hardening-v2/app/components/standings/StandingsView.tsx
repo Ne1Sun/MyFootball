@@ -2,16 +2,19 @@
 
 import { useMemo, useState } from "react";
 import { BarChart3, CheckCircle2, Shield, TrendingUp, Trophy } from "lucide-react";
-import type { Division, Entry, Fixture } from "../types";
+import type { Division, Entry, Fixture, MatchEvent } from "../types";
+import { resolveGroupStandings } from "../../lib/standings-engine";
 
 export function StandingsView({
   divisions,
   entries,
   fixtures,
+  events = [],
 }: {
   divisions: Division[];
   entries: Entry[];
   fixtures: Fixture[];
+  events?: MatchEvent[];
 }) {
   const [selectedDivisionId, setSelectedDivisionId] = useState<string>(divisions[0]?.id || "");
 
@@ -27,92 +30,44 @@ export function StandingsView({
     return fixtures.filter((f) => f.divisionId === division.id && f.stage === "group");
   }, [fixtures, division]);
 
-  // Group entries by groupName (e.g. Group A, Group B)
+  // Resolve official AIFF 6-tier group standings
   const groupedStandings = useMemo(() => {
     if (!division) return {};
 
-    const groups: Record<
-      string,
-      Array<{
-        entry: Entry;
-        p: number;
-        w: number;
-        d: number;
-        l: number;
-        gf: number;
-        ga: number;
-        gd: number;
-        pts: number;
-        form: Array<"W" | "D" | "L">;
-      }>
-    > = {};
-
-    divisionEntries.forEach((entry) => {
-      const gName = entry.groupName || "Group A";
-      if (!groups[gName]) groups[gName] = [];
-      groups[gName].push({
-        entry,
-        p: 0,
-        w: 0,
-        d: 0,
-        l: 0,
-        gf: 0,
-        ga: 0,
-        gd: 0,
-        pts: 0,
-        form: [],
-      });
-    });
-
-    // Calculate match outcomes
-    divisionFixtures
-      .filter((f) => f.status === "completed")
-      .forEach((fixture) => {
-        for (const list of Object.values(groups)) {
-          const home = list.find((item) => item.entry.id === fixture.homeEntryId);
-          const away = list.find((item) => item.entry.id === fixture.awayEntryId);
-          if (home && away) {
-            home.p += 1;
-            away.p += 1;
-            home.gf += fixture.homeScore;
-            home.ga += fixture.awayScore;
-            away.gf += fixture.awayScore;
-            away.ga += fixture.homeScore;
-
-            if (fixture.homeScore > fixture.awayScore) {
-              home.w += 1;
-              away.l += 1;
-              home.pts += division.winPoints;
-              away.pts += division.lossPoints;
-              home.form.push("W");
-              away.form.push("L");
-            } else if (fixture.homeScore < fixture.awayScore) {
-              away.w += 1;
-              home.l += 1;
-              away.pts += division.winPoints;
-              home.pts += division.lossPoints;
-              away.form.push("W");
-              home.form.push("L");
-            } else {
-              home.d += 1;
-              away.d += 1;
-              home.pts += division.drawPoints;
-              away.pts += division.drawPoints;
-              home.form.push("D");
-              away.form.push("D");
-            }
-          }
-        }
-      });
-
-    // Sort each group by Points -> GD -> GF
-    for (const [groupName, list] of Object.entries(groups)) {
-      list.forEach((item) => (item.gd = item.gf - item.ga));
-      groups[groupName] = list.sort((a, b) => b.pts - a.pts || b.gd - a.gd || b.gf - a.gf);
-    }
-
-    return groups;
-  }, [division, divisionEntries, divisionFixtures]);
+    return resolveGroupStandings(
+      divisionEntries.map((e) => ({
+        id: e.id,
+        divisionId: e.divisionId,
+        teamId: e.teamId,
+        teamName: e.teamName,
+        clubName: e.clubName,
+        groupName: e.groupName,
+        seed: e.seed,
+        city: e.city,
+      })),
+      divisionFixtures.map((f) => ({
+        id: f.id,
+        divisionId: f.divisionId,
+        homeEntryId: f.homeEntryId,
+        awayEntryId: f.awayEntryId,
+        homeScore: f.homeScore,
+        awayScore: f.awayScore,
+        status: f.status,
+        stage: f.stage,
+      })),
+      events.map((ev) => ({
+        id: ev.id,
+        fixtureId: ev.fixtureId,
+        entryId: ev.entryId,
+        type: ev.type,
+        playerId: ev.playerId,
+        matchMinute: ev.matchMinute,
+      })),
+      division.winPoints,
+      division.drawPoints,
+      division.lossPoints
+    );
+  }, [division, divisionEntries, divisionFixtures, events]);
 
   const getFormPill = (result: "W" | "D" | "L") => {
     switch (result) {
@@ -186,6 +141,7 @@ export function StandingsView({
                   <th className="py-2.5 px-3 text-center">GA</th>
                   <th className="py-2.5 px-3 text-center">GD</th>
                   <th className="py-2.5 px-3 text-right">Pts</th>
+                  <th className="py-2.5 px-3 text-center" title="Fair Play Disciplinary Score (Fewer penalty cards)">FP</th>
                   <th className="py-2.5 px-3 text-center">Form</th>
                 </tr>
               </thead>
@@ -216,7 +172,14 @@ export function StandingsView({
                         <div className="flex items-center gap-2">
                           <Shield size={16} className={qualifies ? "text-emerald-500" : "text-muted-foreground"} />
                           <div>
-                            <strong className="text-foreground">{row.entry.teamName}</strong>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <strong className="text-foreground">{row.entry.teamName}</strong>
+                              {row.tieBreakerReason && (
+                                <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-primary/10 text-primary border border-primary/20" title={`Tie-break: ${row.tieBreakerReason}`}>
+                                  {row.tieBreakerReason}
+                                </span>
+                              )}
+                            </div>
                             <div className="text-[11px] text-muted-foreground">{row.entry.clubName} • {row.entry.city}</div>
                           </div>
                         </div>
@@ -232,6 +195,9 @@ export function StandingsView({
                       </td>
                       <td className="py-3 px-3 text-right font-mono font-black text-primary text-base">
                         {row.pts}
+                      </td>
+                      <td className="py-3 px-3 text-center font-mono text-xs text-muted-foreground" title={`Fair Play score: ${row.fairPlayScore}`}>
+                        {row.fairPlayScore}
                       </td>
                       <td className="py-3 px-3">
                         <div className="flex items-center justify-center gap-1">

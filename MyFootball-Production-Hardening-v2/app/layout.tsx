@@ -1,7 +1,18 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Plus_Jakarta_Sans, Space_Grotesk, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { RouteTransitionBar } from "./components/layout/RouteTransitionBar";
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 5,
+  viewportFit: "cover",
+  themeColor: [
+    { media: "(prefers-color-scheme: dark)", color: "#0f141c" },
+    { media: "(prefers-color-scheme: light)", color: "#f1f4f9" },
+  ],
+};
 
 const plusJakarta = Plus_Jakarta_Sans({
   variable: "--font-display",

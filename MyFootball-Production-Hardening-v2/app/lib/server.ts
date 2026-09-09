@@ -17,7 +17,12 @@ export async function requireApiUser() {
     });
 
   const [profile] = await db.select().from(users).where(eq(users.email, user.email)).limit(1);
-  return { ...user, role: profile.role, preferredState: profile.preferredState, preferredCity: profile.preferredCity };
+  return {
+    ...user,
+    role: (user.role || profile?.role || "fan") as "organizer" | "coach" | "referee" | "fan",
+    preferredState: profile?.preferredState || "",
+    preferredCity: profile?.preferredCity || "",
+  };
 }
 
 export function apiError(error: unknown) {

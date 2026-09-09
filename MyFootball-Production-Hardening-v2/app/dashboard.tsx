@@ -14,6 +14,7 @@ import {
   Compass,
   Crown,
   FastForward,
+  FileText,
   Globe,
   IndianRupee,
   LayoutDashboard,
@@ -43,6 +44,7 @@ import type { AppData, Division, Entry, Fixture, MatchEvent, Player, SquadMember
 import { SquadManager } from "./components/squads/SquadManager";
 import { LiveMatchConsole } from "./components/matchday/LiveMatchConsole";
 import { KnockoutBracket } from "./components/brackets/KnockoutBracket";
+import { FeeReceiptModal } from "./components/payments/FeeReceiptModal";
 import { LeaderboardsView } from "./components/stats/LeaderboardsView";
 import { StandingsView } from "./components/standings/StandingsView";
 
@@ -551,6 +553,7 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [teamOpen, setTeamOpen] = useState(false);
   const [fixtureOpen, setFixtureOpen] = useState(false);
+  const [receiptEntry, setReceiptEntry] = useState<Entry | null>(null);
 
   const activeTournament = useMemo(
     () => data.tournaments.find((t) => t.id === selectedId) || data.tournaments[0],
@@ -640,13 +643,18 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
       setTimeout(() => setToast(""), 4000);
       await refreshData();
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : "Error performing action");
+      const msg = err instanceof Error ? err.message : "Error performing action";
+      setError(msg);
+      setTimeout(() => setError(""), 6000);
     } finally {
       setBusy(false);
     }
   };
 
-  const handleOpenMatchday = (_fixtureId: string) => {
+  const [activeMatchdayFixtureId, setActiveMatchdayFixtureId] = useState<string>("");
+
+  const handleOpenMatchday = (fixtureId: string) => {
+    setActiveMatchdayFixtureId(fixtureId);
     setView("Matchday");
   };
 
@@ -660,7 +668,11 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
       >
         <div className="p-5 border-b border-border flex items-center justify-between">
           <Logo />
-          <button className="lg:hidden p-1.5 text-muted-foreground" onClick={() => setSidebar(false)}>
+          <button
+            className="lg:hidden min-h-[44px] min-w-[44px] flex items-center justify-center p-2 text-muted-foreground hover:text-foreground rounded-lg"
+            onClick={() => setSidebar(false)}
+            aria-label="Close navigation sidebar"
+          >
             <X size={18} />
           </button>
         </div>
@@ -1087,15 +1099,32 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
                           <div className="font-mono text-[10px]">{entry.contactPhone}</div>
                         </td>
                         <td className="py-3 px-3">
-                          <span
-                            className={`text-xs px-2 py-0.5 rounded-full font-bold uppercase ${
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const nextStatus =
+                                entry.paymentStatus === "paid"
+                                  ? "waived"
+                                  : entry.paymentStatus === "waived"
+                                  ? "unpaid"
+                                  : "paid";
+                              await handleSaveAction({
+                                action: "updateEntry",
+                                entryId: entry.id,
+                                paymentStatus: nextStatus,
+                              });
+                            }}
+                            title="Click to toggle payment status (paid / waived / unpaid)"
+                            className={`text-xs px-2.5 py-0.5 rounded-full font-bold uppercase transition hover:opacity-80 cursor-pointer ${
                               entry.paymentStatus === "paid"
-                                ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
-                                : "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                                ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30"
+                                : entry.paymentStatus === "waived"
+                                ? "bg-purple-500/15 text-purple-600 dark:text-purple-400 border border-purple-500/30"
+                                : "bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30"
                             }`}
                           >
                             {entry.paymentStatus}
-                          </span>
+                          </button>
                         </td>
                         <td className="py-3 px-3">
                           <span
@@ -1109,15 +1138,29 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
                           </span>
                         </td>
                         <td className="py-3 px-3 text-right">
-                          <button
-                            onClick={() => {
-                              setSelectedId(activeTournament.id);
-                              setView("Squads");
-                            }}
-                            className="text-xs px-2.5 py-1 rounded bg-primary/10 text-primary font-bold hover:bg-primary/20 transition"
-                          >
-                            Manage Squad
-                          </button>
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setReceiptEntry(entry)}
+                              className="text-xs px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold transition flex items-center gap-1"
+                              title="Print or view official digital fee receipt"
+                            >
+                              <FileText size={13} className="text-amber-400" />
+                              Receipt
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (activeTournament) {
+                                  setSelectedId(activeTournament.id);
+                                }
+                                setView("Squads");
+                              }}
+                              className="text-xs px-2.5 py-1 rounded bg-primary/10 text-primary font-bold hover:bg-primary/20 transition"
+                            >
+                              Manage Squad
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -1170,6 +1213,7 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
               events={activeEvents}
               players={data.players}
               squadMembers={data.squadMembers}
+              initialFixtureId={activeMatchdayFixtureId}
               onSaveAction={handleSaveAction}
             />
           )}
@@ -1180,6 +1224,7 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
               divisions={activeDivisions}
               entries={activeEntries}
               fixtures={activeFixtures}
+              events={activeEvents}
             />
           )}
 
@@ -1204,6 +1249,10 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
                 <form
                   onSubmit={async (e) => {
                     e.preventDefault();
+                    if (!activeTournament) {
+                      setError("No active tournament selected to broadcast announcements.");
+                      return;
+                    }
                     const form = new FormData(e.currentTarget);
                     await handleSaveAction({
                       action: "sendAnnouncement",
@@ -1220,7 +1269,7 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
                     placeholder="Type urgent match updates, pitch changes, or tournament broadcast..."
                     required
                     rows={3}
-                    className="w-full p-3 rounded-xl bg-muted/40 border border-border text-foreground text-sm focus:outline-none"
+                    className="w-full p-3 rounded-xl bg-muted/40 border border-border text-foreground text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
                   />
                   <div className="flex items-center justify-between">
                     <select name="audience" className="text-xs bg-muted p-2 rounded-xl border border-border text-foreground">
@@ -1257,6 +1306,22 @@ export default function Dashboard({ user }: { user: ChatGPTUser }) {
       {teamOpen && <AddTeamModal divisions={activeDivisions} onClose={() => setTeamOpen(false)} onSaved={handleSaveAction} />}
       {fixtureOpen && (
         <GenerateFixturesModal divisions={activeDivisions} onClose={() => setFixtureOpen(false)} onSaved={handleSaveAction} />
+      )}
+      {receiptEntry && activeTournament && (
+        <FeeReceiptModal
+          entry={receiptEntry}
+          tournament={activeTournament}
+          divisionName={activeDivisions.find((d) => d.id === receiptEntry.divisionId)?.name || "Division"}
+          onClose={() => setReceiptEntry(null)}
+          onUpdatePaymentStatus={async (entryId, newStatus) => {
+            await handleSaveAction({
+              action: "updateEntry",
+              entryId,
+              paymentStatus: newStatus,
+            });
+            setReceiptEntry((prev: any) => (prev ? { ...prev, paymentStatus: newStatus } : null));
+          }}
+        />
       )}
     </div>
   );

@@ -107,8 +107,72 @@ export async function GET(request: Request) {
               ),
             )
         : [];
+    const liveFixtureRows = fixtureRows.filter((f) => f.status === "in_progress");
+    const liveEntryIds = [
+      ...new Set(
+        liveFixtureRows
+          .flatMap((f) => [f.homeEntryId, f.awayEntryId])
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ];
+
+    const liveEntries = liveEntryIds.length
+      ? await db
+          .select({
+            id: entries.id,
+            teamName: teams.name,
+            clubName: clubs.name,
+          })
+          .from(entries)
+          .innerJoin(teams, eq(entries.teamId, teams.id))
+          .innerJoin(clubs, eq(teams.clubId, clubs.id))
+          .where(inArray(entries.id, liveEntryIds))
+      : [];
+
+    const entryNameMap = new Map(
+      liveEntries.map((e) => [e.id, { teamName: e.teamName, clubName: e.clubName }]),
+    );
+    const divisionMap = new Map(divisionRows.map((d) => [d.id, d]));
+    const tournamentMap = new Map(visible.map((t) => [t.id, t]));
+
+    const liveMatches = liveFixtureRows.map((f) => {
+      const div = divisionMap.get(f.divisionId);
+      const tourney = div ? tournamentMap.get(div.tournamentId) : null;
+      const home = f.homeEntryId ? entryNameMap.get(f.homeEntryId) : null;
+      const away = f.awayEntryId ? entryNameMap.get(f.awayEntryId) : null;
+      return {
+        fixtureId: f.id,
+        tournamentId: tourney?.id || "",
+        tournamentName: tourney?.name || "Tournament",
+        tournamentState: tourney?.state || "",
+        venueName: tourney?.venueName || "",
+        divisionId: f.divisionId,
+        divisionName: div?.name || "Division",
+        matchDurationMinutes: div?.matchDurationMinutes || 50,
+        roundName: f.roundName,
+        pitch: f.pitch,
+        status: f.status,
+        period: f.period,
+        matchClockMinute: f.matchClockMinute,
+        clockStartedAt: f.clockStartedAt,
+        clockRunning: Boolean(f.clockRunning),
+        clockElapsedSeconds: f.clockElapsedSeconds ?? 0,
+        stoppageMinutes: f.stoppageMinutes ?? 0,
+        clockPauseReason: f.clockPauseReason,
+        homeScore: f.homeScore,
+        awayScore: f.awayScore,
+        homeScorePenalties: f.homeScorePenalties,
+        awayScorePenalties: f.awayScorePenalties,
+        homeTeamName: home?.teamName || "Home Team",
+        homeClubName: home?.clubName || "",
+        awayTeamName: away?.teamName || "Away Team",
+        awayClubName: away?.clubName || "",
+      };
+    });
+
     const followedIds = new Set(followed.map((item) => item.tournamentId));
     return Response.json({
+      liveMatches,
       tournaments: visible.map((tournament) => {
         const tournamentDivisions = divisionRows.filter(
           (item) => item.tournamentId === tournament.id,

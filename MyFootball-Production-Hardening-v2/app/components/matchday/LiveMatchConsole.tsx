@@ -32,6 +32,8 @@ import {
 import type { Division, Entry, Fixture, MatchEvent, Player, SquadMember } from "../types";
 import { GoalCelebration } from "./GoalCelebration";
 import { TacticalPitch } from "../tactics/TacticalPitch";
+import { computeSubstitutionState } from "../../lib/substitution-rules";
+import { usePitchClock, PAUSE_REASONS, type PauseReasonKey } from "../../lib/pitch-clock";
 
 export function LiveMatchConsole({
   divisions,
@@ -40,6 +42,7 @@ export function LiveMatchConsole({
   events,
   players,
   squadMembers,
+  initialFixtureId,
   onSaveAction,
 }: {
   divisions: Division[];
@@ -48,14 +51,24 @@ export function LiveMatchConsole({
   events: MatchEvent[];
   players: Player[];
   squadMembers: SquadMember[];
+  initialFixtureId?: string;
   onSaveAction: (payload: Record<string, unknown>) => Promise<void>;
 }) {
   const [selectedFixtureId, setSelectedFixtureId] = useState<string>(
-    fixtures.find((f) => f.status === "in_progress")?.id || fixtures[0]?.id || ""
+    initialFixtureId || fixtures.find((f) => f.status === "in_progress")?.id || fixtures[0]?.id || ""
   );
 
-  const [activeModal, setActiveModal] = useState<"goal" | "card" | "sub" | "shootout" | "potm" | null>(null);
+  useEffect(() => {
+    if (initialFixtureId && fixtures.some((f) => f.id === initialFixtureId)) {
+      setSelectedFixtureId(initialFixtureId);
+    } else if (fixtures.length > 0 && !fixtures.some((f) => f.id === selectedFixtureId)) {
+      setSelectedFixtureId(fixtures.find((f) => f.status === "in_progress")?.id || fixtures[0].id);
+    }
+  }, [initialFixtureId, fixtures, selectedFixtureId]);
+
+  const [activeModal, setActiveModal] = useState<"goal" | "card" | "sub" | "potm" | null>(null);
   const [matchViewTab, setMatchViewTab] = useState<"events" | "tactics">("events");
+  const [tacticsTeam, setTacticsTeam] = useState<"home" | "away">("home");
   const [celebrationData, setCelebrationData] = useState<{
     scorerName: string;
     scorerJersey?: number;
@@ -75,6 +88,12 @@ export function LiveMatchConsole({
   const homeEntry = entries.find((e) => e.id === currentFixture?.homeEntryId);
   const awayEntry = entries.find((e) => e.id === currentFixture?.awayEntryId);
   const division = divisions.find((d) => d.id === currentFixture?.divisionId);
+
+  // Autonomous IFAB Pitch Clock Engine
+  const pitchClock = usePitchClock(
+    currentFixture,
+    Math.ceil((division?.matchDurationMinutes || 90) / 2)
+  );
 
   // Match events for selected fixture
   const fixtureEvents = useMemo(() => {
@@ -114,6 +133,28 @@ export function LiveMatchConsole({
   // Potm form state
   const [potmPlayerId, setPotmPlayerId] = useState<string>("");
 
+  // Auto-sync event modal minutes with running pitch clock
+  useEffect(() => {
+    if (currentFixture?.status === "in_progress") {
+      setGoalMinute(pitchClock.displayMinute);
+      setCardMinute(pitchClock.displayMinute);
+      setSubMinute(pitchClock.displayMinute);
+    }
+  }, [pitchClock.displayMinute, currentFixture?.status]);
+
+  // IFAB Law 3 live substitution states
+  const homeSubState = useMemo(() => {
+    if (!homeEntry || !currentFixture) return null;
+    return computeSubstitutionState(homeEntry.id, fixtureEvents as any, currentFixture.period);
+  }, [homeEntry, currentFixture, fixtureEvents]);
+
+  const awaySubState = useMemo(() => {
+    if (!awayEntry || !currentFixture) return null;
+    return computeSubstitutionState(awayEntry.id, fixtureEvents as any, currentFixture.period);
+  }, [awayEntry, currentFixture, fixtureEvents]);
+
+  const activeSubState = subTeam === homeEntry?.id ? homeSubState : awaySubState;
+
   useEffect(() => {
     if (homeEntry) setGoalTeam(homeEntry.id);
   }, [homeEntry]);
@@ -132,6 +173,38 @@ export function LiveMatchConsole({
     setBusy(false);
   };
 
+  const handlePauseClock = async (reason = "manual") => {
+    if (!currentFixture) return;
+    setBusy(true);
+    await onSaveAction({
+      action: "pauseMatchClock",
+      fixtureId: currentFixture.id,
+      reason,
+    });
+    setBusy(false);
+  };
+
+  const handleResumeClock = async () => {
+    if (!currentFixture) return;
+    setBusy(true);
+    await onSaveAction({
+      action: "resumeMatchClock",
+      fixtureId: currentFixture.id,
+    });
+    setBusy(false);
+  };
+
+  const handleSetStoppageTime = async (stoppageMinutes: number) => {
+    if (!currentFixture) return;
+    setBusy(true);
+    await onSaveAction({
+      action: "setStoppageTime",
+      fixtureId: currentFixture.id,
+      stoppageMinutes,
+    });
+    setBusy(false);
+  };
+
   const handleStartMatch = async () => {
     if (!currentFixture) return;
     await handleUpdateClock(currentFixture.matchClockMinute || 1, "first_half", "in_progress");
@@ -142,10 +215,41 @@ export function LiveMatchConsole({
     await handleUpdateClock(currentFixture.matchClockMinute, "half_time", "in_progress");
   };
 
+  const handleStartSecondHalf = async () => {
+    if (!currentFixture) return;
+    const secondHalfMinute = division ? Math.floor(division.matchDurationMinutes / 2) + 1 : 46;
+    await handleUpdateClock(secondHalfMinute, "second_half", "in_progress");
+  };
+
   const handleCompleteMatch = async () => {
     if (!currentFixture) return;
     if (!confirm("Are you sure you want to finalize and complete this match?")) return;
-    await handleUpdateClock(90, "completed", "completed");
+    const finishMinute = division?.matchDurationMinutes || 90;
+    await handleUpdateClock(finishMinute, "completed", "completed");
+
+    // Automatically advance winner if knockout match finishes with decisive score or penalties
+    const isScoreDecisive = currentFixture.homeScore !== currentFixture.awayScore;
+    const isPenDecisive =
+      currentFixture.homeScore === currentFixture.awayScore &&
+      (currentFixture.homeScorePenalties || 0) !== (currentFixture.awayScorePenalties || 0);
+
+    if (currentFixture.stage === "knockout" && (isScoreDecisive || isPenDecisive)) {
+      const homeWon = isScoreDecisive
+        ? currentFixture.homeScore > currentFixture.awayScore
+        : (currentFixture.homeScorePenalties || 0) > (currentFixture.awayScorePenalties || 0);
+      const winnerId = homeWon ? currentFixture.homeEntryId : currentFixture.awayEntryId;
+      const loserId = homeWon ? currentFixture.awayEntryId : currentFixture.homeEntryId;
+      if (winnerId && loserId) {
+        await onSaveAction({
+          action: "advanceBracketWinner",
+          fixtureId: currentFixture.id,
+          winningEntryId: winnerId,
+          losingEntryId: loserId,
+          homeScorePenalties: currentFixture.homeScorePenalties || 0,
+          awayScorePenalties: currentFixture.awayScorePenalties || 0,
+        }).catch(() => {});
+      }
+    }
   };
 
   // Event submission
@@ -172,6 +276,9 @@ export function LiveMatchConsole({
       matchPeriod: currentFixture.period || "first_half",
     });
 
+    const isOwnGoal = goalType === "own_goal";
+    const awardedHome = isOwnGoal ? !isHome : isHome;
+
     setCelebrationData({
       scorerName: scorer?.name || "Player",
       scorerJersey: scorer?.jerseyNumber,
@@ -181,8 +288,8 @@ export function LiveMatchConsole({
       minute: goalMinute,
       homeTeam: homeEntry?.teamName || "Home",
       awayTeam: awayEntry?.teamName || "Away",
-      homeScore: isHome ? currentFixture.homeScore + 1 : currentFixture.homeScore,
-      awayScore: !isHome ? currentFixture.awayScore + 1 : currentFixture.awayScore,
+      homeScore: awardedHome ? currentFixture.homeScore + 1 : currentFixture.homeScore,
+      awayScore: !awardedHome ? currentFixture.awayScore + 1 : currentFixture.awayScore,
     });
 
     setBusy(false);
@@ -232,6 +339,7 @@ export function LiveMatchConsole({
       playerName: playerOut?.name || "Player Out",
       playerId: playerOut?.id || null,
       relatedPlayerName: playerIn?.name || "Player In",
+      assistPlayerId: playerIn?.id || null,
       matchMinute: subMinute,
       matchPeriod: currentFixture.period || "second_half",
     });
@@ -348,26 +456,71 @@ export function LiveMatchConsole({
               {currentFixture?.status === "in_progress" ? "LIVE ON PITCH" : currentFixture?.status.toUpperCase()}
             </span>
 
-            <div className="flex items-center gap-1.5 bg-slate-800/80 px-3 py-1 rounded-full border border-slate-700 text-xs font-mono font-bold text-slate-300">
-              <Clock size={13} className="text-primary" />
-              <span>{currentFixture?.matchClockMinute}&apos; MIN</span>
+            <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full border text-xs font-mono font-bold ${
+              pitchClock.isPaused
+                ? "bg-amber-500/20 text-amber-400 border-amber-500/40"
+                : "bg-slate-800/80 border-slate-700 text-slate-300"
+            }`}>
+              <Clock size={13} className="text-amber-400" />
+              <span>{pitchClock.formattedClock}</span>
+              {pitchClock.isPaused && <span className="text-amber-400 font-sans font-black text-[10px]">PAUSED</span>}
               <span className="text-slate-500">|</span>
               <span className="uppercase text-[11px] text-primary">{currentFixture?.period.replace("_", " ")}</span>
             </div>
           </div>
 
           {/* Match Control Buttons */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap justify-end">
             {currentFixture?.status !== "in_progress" ? (
               <button
                 onClick={handleStartMatch}
                 disabled={busy}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg transition"
+                className="inline-flex items-center gap-1.5 min-h-[44px] px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.975] text-white font-bold text-xs shadow-lg transition-transform duration-100 ease-out"
               >
                 <Play size={13} fill="currentColor" /> Start Kick-Off
               </button>
             ) : (
               <>
+                {/* 1-Tap Clock Pause/Resume */}
+                {pitchClock.isPaused ? (
+                  <button
+                    onClick={handleResumeClock}
+                    disabled={busy}
+                    className="inline-flex items-center gap-1 min-h-[44px] px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:scale-[0.975] text-xs font-bold text-white transition-transform shadow-sm"
+                    title="Resume Pitch Clock"
+                  >
+                    <Play size={13} fill="currentColor" /> Resume
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => handlePauseClock("manual")}
+                    disabled={busy}
+                    className="inline-flex items-center gap-1 min-h-[44px] px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 active:scale-[0.975] text-xs font-bold text-white transition-transform shadow-sm"
+                    title="Pause Pitch Clock"
+                  >
+                    <Pause size={13} fill="currentColor" /> Pause
+                  </button>
+                )}
+
+                {/* Stoppage Time Quick Increments */}
+                <div className="flex items-center gap-1.5 bg-slate-800/80 px-2.5 py-1 rounded-xl border border-slate-700">
+                  <span className="text-[11px] text-slate-400 font-bold">Stop:</span>
+                  {[1, 2, 3, 5].map((mins) => (
+                    <button
+                      key={mins}
+                      onClick={() => handleSetStoppageTime(mins)}
+                      disabled={busy}
+                      className={`min-h-[36px] min-w-[36px] px-2 py-1 rounded-lg text-xs font-mono font-bold transition active:scale-95 ${
+                        pitchClock.stoppageAllowanceMinutes === mins
+                          ? "bg-amber-500 text-slate-950 font-black"
+                          : "hover:bg-slate-700 text-slate-300"
+                      }`}
+                    >
+                      +{mins}&apos;
+                    </button>
+                  ))}
+                </div>
+
                 <button
                   onClick={() => handleUpdateClock((currentFixture?.matchClockMinute || 0) + 1, currentFixture?.period || "first_half")}
                   disabled={busy}
@@ -376,13 +529,23 @@ export function LiveMatchConsole({
                 >
                   <FastForward size={13} /> +1&apos;
                 </button>
-                <button
-                  onClick={handlePauseMatch}
-                  disabled={busy}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-600/80 hover:bg-amber-600 text-xs font-bold text-white transition"
-                >
-                  <Pause size={13} /> Half-Time
-                </button>
+                {currentFixture?.period === "half_time" ? (
+                  <button
+                    onClick={handleStartSecondHalf}
+                    disabled={busy}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg transition min-h-[36px]"
+                  >
+                    <Play size={13} fill="currentColor" /> Start 2nd Half
+                  </button>
+                ) : (
+                  <button
+                    onClick={handlePauseMatch}
+                    disabled={busy}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-600/80 hover:bg-amber-600 text-xs font-bold text-white transition min-h-[36px]"
+                  >
+                    <Pause size={13} /> Half-Time
+                  </button>
+                )}
                 <button
                   onClick={handleCompleteMatch}
                   disabled={busy}
@@ -407,6 +570,11 @@ export function LiveMatchConsole({
             {currentFixture?.homeScorePenalties > 0 && (
               <span className="text-xs font-mono px-2 py-0.5 rounded bg-primary/20 text-primary border border-primary/40 font-bold">
                 (Pen: {currentFixture.homeScorePenalties})
+              </span>
+            )}
+            {homeSubState && (
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
+                Subs: {homeSubState.usedSubs}/5 ({homeSubState.usedWindows}/3 Win)
               </span>
             )}
           </div>
@@ -437,6 +605,11 @@ export function LiveMatchConsole({
             {currentFixture?.awayScorePenalties > 0 && (
               <span className="text-xs font-mono px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/40 font-bold">
                 (Pen: {currentFixture.awayScorePenalties})
+              </span>
+            )}
+            {awaySubState && (
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
+                Subs: {awaySubState.usedSubs}/5 ({awaySubState.usedWindows}/3 Win)
               </span>
             )}
           </div>
@@ -490,19 +663,87 @@ export function LiveMatchConsole({
 
       {/* Grid: Live Match Timeline & Squad Lineups */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Live Timeline Stream */}
+        {/* Live Timeline & Tactical Pitch Stream */}
         <div className="lg:col-span-2 panel-card rounded-2xl p-6 bg-card border border-border space-y-4">
-          <div className="flex items-center justify-between pb-3 border-b border-border">
-            <div className="flex items-center gap-2">
-              <TrendingUp size={18} className="text-primary" />
-              <h3 className="font-bold text-base text-foreground">Chronological Match Timeline</h3>
+          <div className="flex flex-wrap items-center justify-between pb-3 border-b border-border gap-3">
+            <div className="flex items-center gap-2 p-1 bg-muted rounded-xl">
+              <button
+                type="button"
+                onClick={() => setMatchViewTab("events")}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition min-h-[36px] flex items-center gap-1.5 ${
+                  matchViewTab === "events"
+                    ? "bg-card text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <TrendingUp size={14} className={matchViewTab === "events" ? "text-primary" : ""} />
+                Match Timeline ({fixtureEvents.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setMatchViewTab("tactics")}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition min-h-[36px] flex items-center gap-1.5 ${
+                  matchViewTab === "tactics"
+                    ? "bg-card text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Users size={14} className={matchViewTab === "tactics" ? "text-primary" : ""} />
+                2D Tactical Pitch
+              </button>
             </div>
-            <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-muted text-muted-foreground">
-              {fixtureEvents.length} Events Logged
-            </span>
+
+            {matchViewTab === "tactics" && (
+              <div className="flex items-center gap-1.5 text-xs font-bold">
+                <button
+                  type="button"
+                  onClick={() => setTacticsTeam("home")}
+                  className={`px-3 py-1.5 rounded-lg border transition ${
+                    tacticsTeam === "home"
+                      ? "bg-primary/20 text-primary border-primary/40 font-black"
+                      : "text-muted-foreground border-border hover:bg-muted"
+                  }`}
+                >
+                  {homeEntry?.teamName || "Home"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTacticsTeam("away")}
+                  className={`px-3 py-1.5 rounded-lg border transition ${
+                    tacticsTeam === "away"
+                      ? "bg-primary/20 text-primary border-primary/40 font-black"
+                      : "text-muted-foreground border-border hover:bg-muted"
+                  }`}
+                >
+                  {awayEntry?.teamName || "Away"}
+                </button>
+              </div>
+            )}
           </div>
 
-          {fixtureEvents.length === 0 ? (
+          {matchViewTab === "tactics" ? (
+            <div className="py-2">
+              {(() => {
+                const activeSquadMembers = tacticsTeam === "home" ? homeSquadMembers : awaySquadMembers;
+                const activeTeamPlayers = tacticsTeam === "home" ? homePlayers : awayPlayers;
+                const activeStartingPlayers = activeTeamPlayers.filter((p) =>
+                  activeSquadMembers.some((sm) => sm.playerId === p.id && sm.isStarting)
+                );
+                const activeBenchPlayers = activeTeamPlayers.filter((p) =>
+                  activeSquadMembers.some((sm) => sm.playerId === p.id && !sm.isStarting)
+                );
+
+                return (
+                  <TacticalPitch
+                    startingPlayers={activeStartingPlayers}
+                    benchPlayers={activeBenchPlayers}
+                    teamName={tacticsTeam === "home" ? homeEntry?.teamName : awayEntry?.teamName}
+                    isInteractive={false}
+                  />
+                );
+              })()}
+            </div>
+          ) : fixtureEvents.length === 0 ? (
             <div className="py-12 text-center text-muted-foreground text-sm italic">
               No match events logged yet. Use the action buttons above to record goals, cards, and substitutions.
             </div>
@@ -536,7 +777,8 @@ export function LiveMatchConsole({
                     <button
                       onClick={() => handleDeleteEvent(ev.id)}
                       title="Undo / Delete Event"
-                      className="p-2 text-muted-foreground hover:text-rose-500 transition rounded-lg hover:bg-rose-500/10"
+                      aria-label={`Delete event at minute ${ev.matchMinute}`}
+                      className="p-2 text-muted-foreground hover:text-rose-500 transition rounded-lg hover:bg-rose-500/10 min-h-[44px] min-w-[44px] flex items-center justify-center"
                     >
                       <Trash2 size={15} />
                     </button>
@@ -606,7 +848,7 @@ export function LiveMatchConsole({
                 <h2>Record Goal</h2>
                 <p>Log a goal with scorer, assist provider, and type.</p>
               </div>
-              <button className="icon-button" onClick={() => setActiveModal(null)}>
+              <button className="icon-button min-h-[44px] min-w-[44px] flex items-center justify-center" onClick={() => setActiveModal(null)} aria-label="Close dialog">
                 <X size={19} />
               </button>
             </div>
@@ -697,7 +939,7 @@ export function LiveMatchConsole({
                 <h2>Issue Booking / Card</h2>
                 <p>Record a yellow or red card against a player.</p>
               </div>
-              <button className="icon-button" onClick={() => setActiveModal(null)}>
+              <button className="icon-button min-h-[44px] min-w-[44px] flex items-center justify-center" onClick={() => setActiveModal(null)} aria-label="Close dialog">
                 <X size={19} />
               </button>
             </div>
@@ -785,7 +1027,7 @@ export function LiveMatchConsole({
                 <h2>Log Player Substitution</h2>
                 <p>Record a tactical or injury substitution.</p>
               </div>
-              <button className="icon-button" onClick={() => setActiveModal(null)}>
+              <button className="icon-button min-h-[44px] min-w-[44px] flex items-center justify-center" onClick={() => setActiveModal(null)} aria-label="Close dialog">
                 <X size={19} />
               </button>
             </div>
@@ -799,6 +1041,25 @@ export function LiveMatchConsole({
                     <option value={awayEntry?.id}>{awayEntry?.teamName}</option>
                   </select>
                 </label>
+
+                {activeSubState && (
+                  <div className="p-3 rounded-xl bg-slate-800/80 border border-slate-700 text-xs space-y-1">
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">Substitutions Used:</span>
+                      <span className="font-mono font-bold text-white">{activeSubState.usedSubs} / {activeSubState.maxSubs}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">In-Play Windows Used:</span>
+                      <span className="font-mono font-bold text-white">{activeSubState.usedWindows} / {activeSubState.maxWindows}</span>
+                    </div>
+                    {activeSubState.isSubExhausted && (
+                      <div className="text-rose-400 font-semibold pt-1">All 5 substitutions used for this match.</div>
+                    )}
+                    {activeSubState.isWindowExhausted && !activeSubState.isSubExhausted && (
+                      <div className="text-amber-400 font-semibold pt-1">All 3 in-play windows used (half-time substitutions only).</div>
+                    )}
+                  </div>
+                )}
 
                 <label className="field">
                   <span>Player Coming Off (Out)</span>
@@ -870,7 +1131,7 @@ export function LiveMatchConsole({
                 <h2>Select Player of the Match</h2>
                 <p>Award the top performer for this match.</p>
               </div>
-              <button className="icon-button" onClick={() => setActiveModal(null)}>
+              <button className="icon-button min-h-[44px] min-w-[44px] flex items-center justify-center" onClick={() => setActiveModal(null)} aria-label="Close dialog">
                 <X size={19} />
               </button>
             </div>

@@ -97,6 +97,11 @@ export type Fixture = {
   status: string; // "scheduled" | "in_progress" | "completed"
   period: string; // "scheduled" | "first_half" | "half_time" | "second_half" | "extra_time" | "penalties" | "completed"
   matchClockMinute: number;
+  clockStartedAt?: string | null;
+  clockRunning?: boolean;
+  clockElapsedSeconds?: number;
+  stoppageMinutes?: number;
+  clockPauseReason?: string | null;
   homeScore: number;
   awayScore: number;
   homeScorePenalties: number;
